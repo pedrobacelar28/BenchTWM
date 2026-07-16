@@ -1,0 +1,11 @@
+{
+  "dataset_name": "icu_sepsis_epsilon_expert_final",
+  "output_dir": "datasets/offline/final/epsilon_expert",
+  "behavior_policy": "epsilon_expert",
+  "epsilon": 0.2,
+  "seed": 0,
+  "num_train_episodes": 50000,
+  "num_val_episodes": 5000,
+  "gamma": 1.0,
+  "overwrite": false
+}

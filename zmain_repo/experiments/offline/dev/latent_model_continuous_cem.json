@@ -1,0 +1,51 @@
+{
+  "algo": "latent_model",
+  "train_mode": "offline",
+  "seed": [
+    0
+  ],
+  "obs_backend": "state_vector",
+  "control_mode": "offline_mpc_cem",
+  "dataset_path": "datasets/offline/dev/expert/100000/train.npz",
+  "val_dataset_path": "datasets/offline/dev/expert/100000/val.npz",
+  "offline_train_steps": 500000,
+  "offline_batch_size": 512,
+  "offline_log_interval": 1000,
+  "offline_eval_interval": 20000,
+  "offline_eval_episodes": 500,
+  "eval_episodes": 1000,
+  "eval_seed_base": 100000,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "gamma": 1.0,
+  "learning_rate": [
+    0.0001
+  ],
+  "hidden_dim": [
+    256
+  ],
+  "latent_dim": [
+    128
+  ],
+  "action_embed_dim": [
+    32
+  ],
+  "cem_horizon": 8,
+  "cem_samples": 256,
+  "cem_elites": 32,
+  "cem_iterations": 5,
+  "cem_alpha": 0.2,
+  "dynamics_loss_weight": [
+    1.0
+  ],
+  "reward_loss_weight": 5.0,
+  "continue_loss_weight": 2.0,
+  "success_threshold": 0.82,
+  "track": false,
+  "use_tensorboard": false,
+  "early_stopping_patience": 20,
+  "early_stopping_min_delta": 0.0,
+  "target_encoder_decay": [
+    0.99
+  ]
+}

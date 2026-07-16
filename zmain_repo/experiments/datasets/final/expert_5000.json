@@ -1,0 +1,10 @@
+{
+  "dataset_name": "icu_sepsis_expert_final_5000",
+  "output_dir": "datasets/offline/final/expert/5000",
+  "behavior_policy": "expert",
+  "seed": 0,
+  "num_train_episodes": 5000,
+  "num_val_episodes": 500,
+  "gamma": 1.0,
+  "overwrite": false
+}

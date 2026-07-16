@@ -1,0 +1,10 @@
+{
+  "dataset_name": "icu_sepsis_random_dev",
+  "output_dir": "datasets/offline/dev/random",
+  "behavior_policy": "random_admissible",
+  "seed": 0,
+  "num_train_episodes": 5000,
+  "num_val_episodes": 500,
+  "gamma": 1.0,
+  "overwrite": false
+}
