@@ -5,12 +5,13 @@ from __future__ import annotations
 import copy
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
 from src.algorithms.common import TrainLogger, make_writer, random_admissible_action, recent_window_mean
-from src.envs.icu_adapter import ICUSepsisEnvWrapper
+from src.envs.factory import make_env
 from src.models.cem_world_models import RawDynamicsModel, ReconstructiveLatentModel, LatentDynamicsModel
 from src.planners.cem import CategoricalCEMPlanner
 from src.utils.replay import ReplayBuffer
@@ -86,13 +87,26 @@ class CEMWorldModelPolicy:
             return scores
 
     def act(self, obs, info, deterministic: bool = True) -> int:
-        del deterministic
+        action, probabilities = self._plan(obs, info)
+        if deterministic:
+            return action
+        return int(torch.multinomial(torch.as_tensor(probabilities, device=self.device), 1).item())
+
+    def _plan(self, obs, info) -> tuple[int, np.ndarray]:
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         rollout_state = self.model.rollout_state_from_obs(obs_tensor).squeeze(0)
         action_mask = torch.tensor(info["action_mask"], dtype=torch.float32, device=self.device)
         scorer = lambda sequences: self._score_sequences(rollout_state, sequences)
         action, self.last_plan_stats = self.planner.plan(scorer, first_action_mask=action_mask)
-        return int(action)
+        return int(action), np.asarray(self.last_plan_stats["first_action_probs"], dtype=np.float64)
+
+    def action_probabilities(self, obs, info, deterministic: bool = True) -> np.ndarray:
+        action, probabilities = self._plan(obs, info)
+        if deterministic:
+            out = np.zeros_like(probabilities)
+            out[action] = 1.0
+            return out
+        return probabilities / probabilities.sum()
 
 
 def _latent_model_target_encoder_decay(args) -> float:
@@ -263,7 +277,7 @@ def rollout_validation_metrics(model, dataset, args, *, model_family: str, obs_b
 
 
 def make_policy(model, config: dict) -> CEMWorldModelPolicy:
-    env = ICUSepsisEnvWrapper(obs_backend=config["obs_backend"])
+    env = make_env(config, obs_backend=config["obs_backend"])
     planner = CategoricalCEMPlanner(
         horizon=config["cem_horizon"],
         num_actions=env.num_actions,
@@ -285,7 +299,7 @@ def train(config: dict, output_dir, *, model_family: str):
     latent_model_target_decay = _latent_model_target_encoder_decay(args) if model_family == "latent_model" else None
     set_seed(args.seed)
     device = get_torch_device()
-    env = ICUSepsisEnvWrapper(obs_backend=args.obs_backend, seed=args.seed)
+    env = make_env(config, obs_backend=args.obs_backend, seed=args.seed)
     model = build_model(
         model_family,
         obs_dim=env.obs_dim,
@@ -318,6 +332,7 @@ def train(config: dict, output_dir, *, model_family: str):
 
     obs, info = env.reset(seed=args.seed)
     episode_actions: list[int] = []
+    episode_metric_series = [env.transition_metrics(info)]
     episode_return = 0.0
     episode_length = 0
     episode_number = 0
@@ -348,6 +363,7 @@ def train(config: dict, output_dir, *, model_family: str):
             next_state_id=next_info["state_id"],
         )
         episode_actions.append(action)
+        episode_metric_series.append(env.transition_metrics(next_info))
         episode_return += reward
         episode_length += 1
         global_step += 1
@@ -369,7 +385,23 @@ def train(config: dict, output_dir, *, model_family: str):
         info = next_info
 
         if done:
-            logger.log_episode(episode_number + 1, episode_return, episode_length, global_step, episode_actions)
+            outcome = env.episode_metrics(
+                total_reward=episode_return,
+                final_info=info,
+                transition_metrics=episode_metric_series,
+            )
+            logger.log_episode(
+                episode_number + 1,
+                episode_return,
+                episode_length,
+                global_step,
+                episode_actions,
+                success=bool(outcome["success"]),
+                action_distance=env.action_distance,
+                action_is_abrupt=env.action_is_abrupt,
+                transition_metrics=episode_metric_series,
+                outcome=outcome,
+            )
             score = recent_window_mean(logger.returns)
             if score >= best_score:
                 best_score = score
@@ -377,6 +409,7 @@ def train(config: dict, output_dir, *, model_family: str):
             episode_number += 1
             obs, info = env.reset(seed=args.seed + episode_number)
             episode_actions = []
+            episode_metric_series = [env.transition_metrics(info)]
             episode_return = 0.0
             episode_length = 0
 
@@ -392,7 +425,7 @@ def train(config: dict, output_dir, *, model_family: str):
 
 
 def load_policy(config: dict, checkpoint: dict, *, model_family: str):
-    env = ICUSepsisEnvWrapper(obs_backend=config["obs_backend"])
+    env = make_env(config, obs_backend=config["obs_backend"])
     model = build_model(
         model_family,
         obs_dim=env.obs_dim,

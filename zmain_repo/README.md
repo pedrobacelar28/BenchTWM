@@ -1,83 +1,66 @@
-# ICU-Sepsis World-Model Experiments
+# Structured Offline RL World-Model Benchmark Suite
 
-This repository contains the code used to train, evaluate, and analyze the
-offline DQN/PPO baselines and CEM-based world-model agents from the
-ICU-Sepsis paper.
+This repository is a reproducible research suite for structured offline RL and
+world-model agents. It currently integrates two healthcare-oriented benchmark
+environments:
 
-The repository is intentionally source-focused. Generated datasets, checkpoints,
-Optuna databases, trajectory CSVs, and plot/report outputs are not included
-because they are large and can be regenerated from the provided configs.
+- **ICU-Sepsis**: a tabular MDP derived from MIMIC-III records.
+- **EpiCare**: a procedurally generated POMDP for longitudinal treatment
+  regimes with hidden disease state and observed symptoms.
 
-## Contents
+The suite keeps the original ICU workflow compatible while exposing a common
+environment, dataset, evaluation, and reporting contract. It is a benchmark
+and research codebase, not a clinical decision-support system.
 
-- `src/`: training code, models, planners, environment wrappers, and utilities.
-- `experiments/`: JSON configs for dataset generation and paper offline runs,
-  plus optional online smoke configs for retained methods.
-- `scripts/`: launchers for sweeps, Optuna studies, and result collection.
-- `analysis/`: result aggregation, plotting, reporting, and qualitative-case
-  analysis.
-- `tests/`: unit and smoke tests.
-- `third_party/icu-sepsis/`: vendored ICU-Sepsis benchmark packages used by the
-  experiments.
-
-## Setup
-
-Create and activate a Python environment, then install the project dependencies:
+## Start Here
 
 ```bash
+cd /scratch/pedrobacelar/BenchTWM/zmain_repo
 pip install -r requirements.txt
+
+# Discover all supported experiment configs.
+python scripts/bench.py list
+python scripts/bench.py list --env epicare
+
+# Generate the small EpiCare SMART dataset and train DQN offline.
+python scripts/bench.py dataset --config experiments/datasets/dev/epicare_smart.json
+python scripts/bench.py run --config experiments/offline/dev/epicare_dqn.json
+
+# Preview an entire suite; --execute is required to launch it.
+python scripts/bench.py suite --env epicare --mode offline --tier dev
+
+# Validate the implementation.
+PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The ICU-Sepsis benchmark packages are included under `third_party/`; the code
-also supports a sibling `icu-sepsis/` checkout if one exists.
+All previous commands remain supported, including `src/run_config.py`,
+`src/offline/generate_dataset.py`, and `scripts/run_sweep.py`.
 
-## Quickstart
+## Documentation
 
-Run one indexed config from a JSON sweep:
+- [Operations and commands](docs/operations.md)
+- [Benchmarks and environment contract](docs/benchmarks.md)
+- [Offline data schema](docs/data-schema.md)
+- [Algorithms](docs/algorithms.md)
+- [Training, direct evaluation, and OPE](docs/evaluation.md)
+- [Adding an environment or algorithm](docs/extending.md)
+- [Conference-style technical specification (LaTex)](docs/paper/main.tex)
 
-```bash
-python src/run_config.py experiments/offline/dev/dqn.json 0
+The source papers used for the benchmark descriptions are retained outside the
+package at `../repos_usados/papers_txt/`. The runnable third-party cores are
+vendored under `third_party/`.
+
+## Layout
+
+```text
+src/            Runtime code: environments, algorithms, models, data, evaluation
+experiments/    Versioned JSON configurations, grouped by mode and tier
+scripts/        CLI and compatible historical launch helpers
+analysis/       Reports, trajectory plots, tables, and qualitative analysis
+docs/           Operational and technical documentation
+tests/          Unit, regression, and smoke tests
+third_party/    Vendored benchmark cores and their licenses
 ```
 
-Run all pending configs from one or more JSON files:
-
-```bash
-python scripts/run_sweep.py -j experiments/offline/dev/dqn.json
-```
-
-Generate an offline dataset:
-
-```bash
-python src/offline/generate_dataset.py experiments/datasets/dev/expert_100000.json
-```
-
-Train one offline method on a generated dataset:
-
-```bash
-python src/run_config.py experiments/offline/dev/raw_model_discrete_cem.json 0
-```
-
-Run the test suite:
-
-```bash
-pytest -q
-```
-
-## Method Names
-
-The paper's model-based CEM variants use descriptive names throughout the
-public code:
-
-- `raw_model`: predicts the next observation directly in the observation space.
-- `latent_model`: predicts an EMA-target latent representation.
-- `reconstructive_model`: predicts in latent space and reconstructs the next
-  observation.
-
-Each world-model family has discrete and continuous CEM configs, matching the
-OS-WM, LP-WM, and RL-WM variants described in the paper. The retained
-model-free baselines are `dqn` and `ppo`.
-
-For offline configs, `offline_train_steps` is the gradient-update budget and
-`offline_batch_size` is the number of sampled transitions per update.
-
-See `docs/README.md` for the full layout and output schema.
+Generated datasets, checkpoints, reports, and trial databases remain local and
+are intentionally excluded from version control.

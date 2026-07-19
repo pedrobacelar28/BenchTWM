@@ -1,0 +1,8 @@
+This directory vendors the core EpiCare environment and reference policies.
+
+Source: https://github.com/mshargrave/EpiCare
+Copyright 2024 Mason Hargrave, Alex Spaeth, and Logan Grosenick.
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+The vendored environment was adapted locally to use the Gymnasium reset/step
+API and per-instance random number generators for reproducible rollouts.

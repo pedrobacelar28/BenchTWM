@@ -1421,11 +1421,143 @@ def _write_summary_json(output_root: Path, payload: dict) -> None:
         json.dump(payload, handle, indent=2, ensure_ascii=True)
 
 
+def _environment_spec_for_run(run: RunArtifacts) -> dict:
+    path = Path(run.manifest_row["output_dir"]) / "environment_spec.json"
+    if path.exists():
+        return _read_json(path)
+    return {"env_id": run.config.get("env_id", "icu_sepsis"), "metric_names": [], "action_geometry": {"type": "categorical"}}
+
+
+def _generate_generic_report(
+    run_dir: Path,
+    output_root: Path,
+    formats: list[str],
+    artifacts: list[RunArtifacts],
+    missing_artifacts_df: pd.DataFrame,
+) -> Path:
+    """Report canonical exports without ICU-specific SOFA or action-grid assumptions."""
+    rows: list[dict] = []
+    action_frames: list[pd.DataFrame] = []
+    metric_frames: list[pd.DataFrame] = []
+    ope_rows: list[dict] = []
+    for artifact in artifacts:
+        spec = _environment_spec_for_run(artifact)
+        episodes = artifact.episodes.copy()
+        trajectories = artifact.trajectories.copy()
+        success_column = "success" if "success" in episodes else "survived"
+        row = {
+            "env_id": spec["env_id"],
+            "dataset_tag": artifact.manifest_row["dataset_tag"],
+            "algorithm": artifact.manifest_row["algorithm"],
+            "method_id": artifact.manifest_row["method_id"],
+            "display_name": _method_label(artifact.manifest_row["method_id"]),
+            "seed": artifact.config.get("seed"),
+            "mean_return": float(episodes["return"].mean()) if not episodes.empty else 0.0,
+            "mean_success": float(episodes[success_column].mean()) if not episodes.empty else 0.0,
+            "mean_length": float(episodes["length"].mean()) if not episodes.empty else 0.0,
+            "mean_action_stability_l1": float(episodes["action_stability_l1"].mean()) if not episodes.empty else 0.0,
+            "mean_abrupt_jump_rate": float(episodes["abrupt_jump_rate"].mean()) if not episodes.empty else 0.0,
+        }
+        for metric_name in spec.get("metric_names", []):
+            column = f"mean_{metric_name}"
+            if column in episodes:
+                row[column] = float(episodes[column].mean())
+                metric_frames.append(
+                    pd.DataFrame(
+                        {
+                            "env_id": spec["env_id"],
+                            "dataset_tag": artifact.manifest_row["dataset_tag"],
+                            "method_id": artifact.manifest_row["method_id"],
+                            "metric": metric_name,
+                            "value": episodes[column],
+                        }
+                    )
+                )
+        rows.append(row)
+        if not trajectories.empty:
+            action_counts = trajectories.groupby(["action_idx", "action_label"], as_index=False).size().rename(columns={"size": "count"})
+            action_counts["proportion"] = action_counts["count"] / action_counts["count"].sum()
+            action_counts["env_id"] = spec["env_id"]
+            action_counts["dataset_tag"] = artifact.manifest_row["dataset_tag"]
+            action_counts["method_id"] = artifact.manifest_row["method_id"]
+            action_frames.append(action_counts)
+        ope_path = Path(artifact.manifest_row["output_dir"]) / "ope_summary.json"
+        if ope_path.exists():
+            payload = _read_json(ope_path)
+            for estimator, values in payload.get("estimators", {}).items():
+                ope_rows.append(
+                    {
+                        "env_id": spec["env_id"],
+                        "dataset_tag": artifact.manifest_row["dataset_tag"],
+                        "method_id": artifact.manifest_row["method_id"],
+                        "estimator": estimator,
+                        **values,
+                        **payload.get("diagnostics", {}),
+                    }
+                )
+    run_summary = pd.DataFrame(rows)
+    action_usage = pd.concat(action_frames, ignore_index=True) if action_frames else pd.DataFrame()
+    metric_values = pd.concat(metric_frames, ignore_index=True) if metric_frames else pd.DataFrame()
+    ope_summary = pd.DataFrame(ope_rows)
+    _write_tables(
+        output_root,
+        {
+            "generic_run_summary": run_summary,
+            "generic_action_usage": action_usage,
+            "generic_metric_values": metric_values,
+            "ope_summary": ope_summary,
+            "missing_artifacts": missing_artifacts_df,
+        },
+    )
+    if not run_summary.empty:
+        grouped = run_summary.groupby("method_id", as_index=False).agg(mean_return=("mean_return", "mean"), mean_success=("mean_success", "mean"))
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=180)
+        axes[0].bar(grouped["method_id"], grouped["mean_return"], color=[_method_color(method) for method in grouped["method_id"]])
+        axes[0].set_title("Mean return")
+        axes[1].bar(grouped["method_id"], grouped["mean_success"], color=[_method_color(method) for method in grouped["method_id"]])
+        axes[1].set_ylim(0, 1)
+        axes[1].set_title("Mean success")
+        for axis in axes:
+            axis.tick_params(axis="x", rotation=35)
+        _save_fig(fig, output_root / "plots/core/generic_return_success", formats)
+    if not action_usage.empty:
+        aggregate_actions = action_usage.groupby("action_label", as_index=False)["proportion"].mean().sort_values("proportion", ascending=False)
+        fig, axis = plt.subplots(figsize=(9, 4), dpi=180)
+        axis.bar(aggregate_actions["action_label"], aggregate_actions["proportion"], color="#4c78a8")
+        axis.set_title("Action usage")
+        axis.set_ylabel("Mean proportion")
+        axis.tick_params(axis="x", rotation=45)
+        _save_fig(fig, output_root / "plots/trajectories/generic_action_usage", formats)
+    if not metric_values.empty:
+        metric_means = metric_values.groupby(["method_id", "metric"], as_index=False)["value"].mean()
+        fig, axis = plt.subplots(figsize=(9, 4), dpi=180)
+        for metric_name, frame in metric_means.groupby("metric", sort=True):
+            axis.plot(frame["method_id"], frame["value"], marker="o", label=metric_name)
+        axis.set_title("Environment metrics")
+        axis.legend()
+        axis.tick_params(axis="x", rotation=35)
+        _save_fig(fig, output_root / "plots/core/generic_environment_metrics", formats)
+    _write_summary_json(
+        output_root,
+        {
+            "report_type": "generic",
+            "run_dir": str(run_dir),
+            "num_runs": int(len(run_summary)),
+            "environments": sorted(run_summary["env_id"].dropna().unique().tolist()) if not run_summary.empty else [],
+            "missing_runs": int(len(missing_artifacts_df)),
+        },
+    )
+    return output_root
+
+
 def generate_report(run_dir: Path, output_root: Path, formats: list[str]) -> Path:
     _ensure_dirs(output_root)
     artifacts, missing_artifacts_df = _load_artifacts(run_dir)
     if not artifacts:
         raise RuntimeError(f"No complete runs found under {run_dir}")
+
+    if any(_environment_spec_for_run(artifact).get("env_id") != "icu_sepsis" for artifact in artifacts):
+        return _generate_generic_report(run_dir, output_root, formats, artifacts, missing_artifacts_df)
 
     reference_stats = _load_reference_stats_fast()
     if reference_stats is None:

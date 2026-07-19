@@ -1078,11 +1078,59 @@ def _write_markdown(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _run_generic_selection(args: argparse.Namespace, selected_rows: list[dict], output_dir: Path) -> dict[str, Path]:
+    """Create qualitative artifacts from canonical trajectories without ICU dynamics."""
+    selected_cases: list[dict] = []
+    sequence_frames: list[pd.DataFrame] = []
+    for row in selected_rows:
+        trajectories = _load_trajectories(Path(row["output_dir"]) / "trajectories.csv")
+        success_column = "success" if "success" in trajectories else "survived"
+        grouped = trajectories.sort_values(["episode_id", "t"]).groupby("episode_id", sort=False)
+        episode_rows = []
+        for episode_id, frame in grouped:
+            episode_rows.append(
+                {
+                    "method_id": row["method_id"],
+                    "episode_id": int(episode_id),
+                    "return": float(frame["reward"].sum()),
+                    "success": bool(frame[success_column].iloc[-1]),
+                    "length": int(len(frame)),
+                }
+            )
+        candidates = pd.DataFrame(episode_rows).sort_values(["return", "success"], ascending=[False, False]).head(args.top_k)
+        selected_cases.extend(candidates.to_dict("records"))
+        selected_ids = set(candidates["episode_id"].tolist())
+        sequence = trajectories[trajectories["episode_id"].isin(selected_ids) & (trajectories["t"] < args.horizon)].copy()
+        sequence["method_id"] = row["method_id"]
+        sequence_frames.append(sequence)
+    cases = pd.DataFrame(selected_cases)
+    sequences = pd.concat(sequence_frames, ignore_index=True) if sequence_frames else pd.DataFrame()
+    cases_path = output_dir / "generic_selected_cases.csv"
+    sequences_path = output_dir / "generic_case_sequences.csv"
+    markdown_path = output_dir / "generic_selected_cases.md"
+    cases.to_csv(cases_path, index=False)
+    sequences.to_csv(sequences_path, index=False)
+    lines = ["# Qualitative trajectories", ""]
+    for row in cases.itertuples(index=False):
+        lines.append(
+            f"- `{row.method_id}` episode {row.episode_id}: "
+            f"return={getattr(row, 'return'):.3f}, success={int(row.success)}, length={row.length}"
+        )
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"selected_path": cases_path, "sequences_path": sequences_path, "markdown_path": markdown_path}
+
+
 def run_selection(args: argparse.Namespace) -> dict[str, Path]:
     manifest_rows = _load_manifest(args.manifest)
     selected_rows = _filter_manifest_rows(manifest_rows, dataset_tag=args.dataset_tag, methods=args.methods)
     output_dir = _resolve_output_dir(args.manifest, dataset_tag=args.dataset_tag, output_dir=args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    first_config = Path(selected_rows[0]["output_dir"]) / "config.json"
+    if first_config.exists():
+        with first_config.open("r", encoding="utf-8") as handle:
+            if json.load(handle).get("env_id", "icu_sepsis") != "icu_sepsis":
+                return _run_generic_selection(args, selected_rows, output_dir)
 
     dynamics = _load_dynamics(args.dynamics_path)
     centers = np.asarray(dynamics["state_cluster_centers"], dtype=np.float64)

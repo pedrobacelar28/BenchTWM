@@ -75,4 +75,5 @@ class CategoricalCEMPlanner:
             "samples": self.samples,
             "elites": self.elites,
             "iterations": self.iterations,
+            "first_action_probs": probs[0].detach().cpu().numpy(),
         }

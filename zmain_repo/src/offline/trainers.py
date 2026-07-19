@@ -21,9 +21,8 @@ from src.algorithms.cem_world_models import make_policy as _make_cem_policy
 from src.algorithms.cem_world_models import rollout_validation_metrics as _cem_rollout_validation_metrics
 from src.algorithms.dqn import DQNPolicy
 from src.algorithms.ppo import PPOPolicy
-from src.envs.icu_adapter import ICUSepsisEnvWrapper
 from src.evaluation import evaluate_policy
-from src.models.mlp import TabularActorCritic, TabularQNetwork
+from src.models.mlp import build_actor_critic, build_q_network
 from src.offline.dataset import OfflineTransitionDataset
 from src.utils.metrics import summarize_training
 from src.utils.methods import method_id
@@ -127,6 +126,7 @@ def _short_metric_name(key: str) -> str:
         "mean_action_stability_l1": "stability_l1",
         "mean_abrupt_jump_rate": "abrupt",
         "mean_return": "return",
+        "mean_success": "success",
         "mean_survival": "survival",
         "mean_length": "length",
         "validation_dynamics_loss": "val_dyn",
@@ -284,12 +284,15 @@ def _eval_stats(policy, config: dict, progress: OfflineProgress, args) -> dict:
         progress_desc=f"eval step={progress.step}",
     )
     episodes = result["episodes"]
+    summary_metrics = {
+        key: float(value)
+        for key, value in result["summary"].items()
+        if key.startswith("mean_") and isinstance(value, (int, float, np.number))
+    }
     stats = {
         "step": int(progress.step),
         "sampled_transitions": int(progress.sampled_transitions),
-        "mean_return": float(result["summary"]["mean_return"]),
-        "mean_survival": float(result["summary"]["mean_survival"]),
-        "mean_length": float(result["summary"]["mean_length"]),
+        **summary_metrics,
         "action_stability_l1": float(episodes["action_stability_l1"].mean()) if not episodes.empty else 0.0,
         "abrupt_jump_rate": float(episodes["abrupt_jump_rate"].mean()) if not episodes.empty else 0.0,
     }
@@ -299,9 +302,7 @@ def _eval_stats(policy, config: dict, progress: OfflineProgress, args) -> dict:
         progress,
         {
             "episodes": _eval_episodes(args),
-            "mean_return": stats["mean_return"],
-            "mean_survival": stats["mean_survival"],
-            "mean_length": stats["mean_length"],
+            **summary_metrics,
             "mean_action_stability_l1": stats["action_stability_l1"],
             "mean_abrupt_jump_rate": stats["abrupt_jump_rate"],
         },
@@ -327,7 +328,10 @@ def _metrics_from_history(
     training_metadata: dict[str, Any] | None = None,
 ) -> dict:
     returns = np.asarray([row["mean_return"] for row in eval_history], dtype=np.float32)
-    survival = np.asarray([row["mean_survival"] for row in eval_history], dtype=np.float32)
+    success = np.asarray(
+        [row.get("mean_success", row.get("mean_survival", 0.0)) for row in eval_history],
+        dtype=np.float32,
+    )
     lengths = np.asarray([row["mean_length"] for row in eval_history], dtype=np.float32)
     update_steps = np.asarray([row["step"] for row in eval_history], dtype=np.int32)
     sampled_transitions = np.asarray([row.get("sampled_transitions", 0) for row in eval_history], dtype=np.int32)
@@ -340,6 +344,7 @@ def _metrics_from_history(
         action_stability_l1=stability,
         abrupt_jump_rate=abrupt,
         threshold=float(args.success_threshold),
+        success_rates=success,
     )
     summary.pop("total_env_steps", None)
     summary.pop("episodes_to_threshold", None)
@@ -382,7 +387,8 @@ def _metrics_from_history(
         "total_steps": update_steps,
         "offline_updates": update_steps,
         "offline_sampled_transitions": sampled_transitions,
-        "survival_rate": survival,
+        "success_rate": success,
+        "survival_rate": success,
         "action_stability_l1": stability,
         "abrupt_jump_rate": abrupt,
         "extra_metrics": extra_metrics,
@@ -397,11 +403,20 @@ def _metrics_from_history(
         "offline_eval_history": {
             "step": update_steps,
             "sampled_transitions": sampled_transitions,
-            "eval_mean_return": returns,
-            "eval_mean_survival": survival,
-            "eval_mean_length": lengths,
-            "eval_action_stability_l1": stability,
-            "eval_abrupt_jump_rate": abrupt,
+            **{
+                f"eval_{key}": np.asarray(
+                    [row.get(key, np.nan) for row in eval_history],
+                    dtype=np.float32,
+                )
+                for key in sorted(
+                    {
+                        key
+                        for row in eval_history
+                        for key in row
+                        if key not in {"step", "sampled_transitions"}
+                    }
+                )
+            },
         },
         "summary": summary,
     }
@@ -471,7 +486,7 @@ def _final_result(metrics: dict, last_checkpoint: dict, best_checkpoint: dict) -
     }
 
 
-def _dqn_loss(network: TabularQNetwork, target_network: TabularQNetwork, batch, args) -> torch.Tensor:
+def _dqn_loss(network, target_network, batch, args) -> torch.Tensor:
     with torch.no_grad():
         target_next = target_network(batch.next_obs, batch.next_action_mask).max(dim=1).values
         td_target = batch.reward + float(args.gamma) * target_next * (1.0 - batch.done)
@@ -483,9 +498,21 @@ def train_dqn(config: dict, output_dir):
     args = SimpleNamespace(**config)
     set_seed(args.seed)
     device = get_torch_device()
-    train_dataset, val_dataset = _load_datasets(args, "discrete_id")
-    q_network = TabularQNetwork(train_dataset.num_states, train_dataset.num_actions).to(device)
-    target_network = TabularQNetwork(train_dataset.num_states, train_dataset.num_actions).to(device)
+    train_dataset, val_dataset = _load_datasets(args, args.obs_backend)
+    q_network = build_q_network(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    ).to(device)
+    target_network = build_q_network(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    ).to(device)
     target_network.load_state_dict(q_network.state_dict())
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     train_history = []
@@ -533,7 +560,7 @@ def train_dqn(config: dict, output_dir):
                 checkpoint={"model_state_dict": q_network.state_dict()},
             )
         if progress.eval_due:
-            stats = _eval_stats(DQNPolicy(q_network), config, progress, args)
+            stats = _eval_stats(DQNPolicy(q_network, temperature=float(getattr(args, "policy_temperature", 1.0))), config, progress, args)
             eval_history.append(stats)
             _set_train_postfix(progress, float(loss.item()), {"eval_return": stats["mean_return"]})
         if stop_due:
@@ -553,7 +580,7 @@ def train_dqn(config: dict, output_dir):
     return _final_result(metrics, {"model_state_dict": q_network.state_dict()}, early_stopping.best_checkpoint)
 
 
-def _ppo_losses(agent: TabularActorCritic, batch, args) -> tuple[torch.Tensor, dict]:
+def _ppo_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
     newlogprob, entropy, value = agent.evaluate_actions(batch.obs, batch.action, batch.action_mask)
     value = value.view(-1)
     with torch.no_grad():
@@ -588,8 +615,14 @@ def train_ppo(config: dict, output_dir):
     args = SimpleNamespace(**config)
     set_seed(args.seed)
     device = get_torch_device()
-    train_dataset, val_dataset = _load_datasets(args, "discrete_id")
-    agent = TabularActorCritic(train_dataset.num_states, train_dataset.num_actions).to(device)
+    train_dataset, val_dataset = _load_datasets(args, args.obs_backend)
+    agent = build_actor_critic(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    ).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     train_history = []
     eval_history = []

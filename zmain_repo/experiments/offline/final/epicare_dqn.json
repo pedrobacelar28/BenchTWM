@@ -1,0 +1,10 @@
+{
+  "algo": "dqn", "train_mode": "offline", "env_id": "epicare", "environment_seed": 1,
+  "env_kwargs": {"patient_modifiers": true}, "seed": [0], "obs_backend": "state_vector",
+  "policy_architecture": "mlp", "policy_hidden_dim": [128], "policy_hidden_layers": 2,
+  "dataset_path": "datasets/offline/epicare/final/smart/100000/train.npz", "val_dataset_path": "datasets/offline/epicare/final/smart/100000/val.npz", "ope_dataset_path": "datasets/offline/epicare/final/smart/100000/ope_test.npz",
+  "ope_enabled": true, "ope_bootstrap_replicates": 200, "offline_train_steps": 500000, "offline_batch_size": 256, "offline_log_interval": 1000, "offline_eval_interval": 20000, "offline_eval_episodes": 500,
+  "eval_episodes": 1000, "eval_seed_base": 100000, "save_checkpoints": true, "save_trajectories": true,
+  "learning_rate": [0.001], "gamma": 1.0, "tau": [0.01], "target_network_frequency": [256], "buffer_size": [10000], "batch_size": [64], "start_e": [1.0], "end_e": [0.01], "exploration_fraction": [0.25], "learning_starts": 1000, "train_frequency": 10,
+  "success_threshold": 0.0, "track": false, "use_tensorboard": false, "early_stopping_patience": 20, "early_stopping_min_delta": 0.0
+}

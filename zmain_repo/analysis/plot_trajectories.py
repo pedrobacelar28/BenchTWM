@@ -1,7 +1,8 @@
-"""Plot exported ICU-Sepsis trajectories without notebooks."""
+"""Plot one exported trajectory using its environment specification."""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,6 +15,13 @@ sys.path.append(os.getcwd())
 from src.utils.io import ensure_dir
 
 
+def _spec(run_dir: Path) -> dict:
+    path = run_dir / "environment_spec.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"env_id": "icu_sepsis", "metric_names": ["sofa_score"], "action_geometry": {"type": "grid"}}
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python analysis/plot_trajectories.py <run_dir> [episode_id]")
@@ -23,15 +31,21 @@ if __name__ == "__main__":
     df = pd.read_csv(run_dir / "trajectories.csv")
     if episode_id is None:
         episode_id = int(df["episode_id"].iloc[0])
-    epi = df[df["episode_id"] == episode_id].copy()
-    fig, axes = plt.subplots(3, 1, figsize=(8, 6), dpi=200, sharex=True)
-    axes[0].plot(epi["t"], epi["sofa_score"], marker="o")
-    axes[0].set_ylabel("SOFA")
-    axes[1].step(epi["t"], epi["fluid_bin"], where="post")
-    axes[1].set_ylabel("Fluid")
-    axes[2].step(epi["t"], epi["vaso_bin"], where="post")
-    axes[2].set_ylabel("Vaso")
-    axes[2].set_xlabel("t")
+    episode = df[df["episode_id"] == episode_id].copy()
+    spec = _spec(run_dir)
+    metric_columns = [f"metric_{name}" for name in spec.get("metric_names", []) if f"metric_{name}" in episode]
+    fig, axes = plt.subplots(2 + len(metric_columns), 1, figsize=(9, 2.5 * (2 + len(metric_columns))), dpi=180, sharex=True)
+    axes = list(axes)
+    for axis, column in zip(axes, metric_columns):
+        axis.plot(episode["t"], episode[column], marker="o")
+        axis.set_ylabel(column.removeprefix("metric_"))
+    action_axis = axes[-2]
+    action_axis.step(episode["t"], episode["action_idx"], where="post")
+    action_axis.set_ylabel("action")
+    reward_axis = axes[-1]
+    reward_axis.bar(episode["t"], episode["reward"])
+    reward_axis.set_ylabel("reward")
+    reward_axis.set_xlabel("t")
     out_dir = ensure_dir(Path("plots"))
     fig.tight_layout()
-    fig.savefig(out_dir / f"trajectory_episode_{episode_id}.png")
+    fig.savefig(out_dir / f"trajectory_{spec['env_id']}_episode_{episode_id}.png")

@@ -11,31 +11,52 @@ import torch.nn as nn
 import torch.optim as optim
 
 from src.algorithms.common import TrainLogger, make_writer, recent_window_mean
-from src.envs.icu_adapter import ICUSepsisEnvWrapper
-from src.models.mlp import TabularActorCritic
+from src.envs.factory import make_env
+from src.models.mlp import build_actor_critic
 from src.utils.seeding import set_seed
 from src.utils.torch_utils import get_torch_device
 
 
 class PPOPolicy:
-    def __init__(self, agent: TabularActorCritic):
+    def __init__(self, agent):
         self.agent = agent.eval()
         self.device = next(agent.parameters()).device
 
     def act(self, obs, info, deterministic: bool = True) -> int:
+        if not deterministic:
+            probs = self.action_probabilities(obs, info, deterministic=False)
+            return int(np.random.choice(len(probs), p=probs))
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         mask_tensor = torch.tensor(info["action_mask"], dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             action = self.agent.greedy_action(obs_tensor, mask_tensor)
         return int(action.item())
 
+    def action_probabilities(self, obs, info, deterministic: bool = True):
+        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        mask_tensor = torch.tensor(info["action_mask"], dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            if deterministic:
+                action = self.agent.greedy_action(obs_tensor, mask_tensor).item()
+                probs = torch.zeros(self.agent.policy_logits(obs_tensor, mask_tensor).shape[-1], device=self.device)
+                probs[int(action)] = 1.0
+            else:
+                probs = self.agent.distribution(obs_tensor, mask_tensor).probs.squeeze(0)
+        return probs.cpu().numpy()
+
 
 def train(config: dict, output_dir):
     args = SimpleNamespace(**config)
     set_seed(args.seed)
     device = get_torch_device()
-    env = ICUSepsisEnvWrapper(obs_backend="discrete_id", seed=args.seed)
-    agent = TabularActorCritic(env.num_states, env.num_actions).to(device)
+    env = make_env(config, obs_backend=args.obs_backend, seed=args.seed)
+    agent = build_actor_critic(
+        config,
+        obs_dim=env.obs_dim,
+        num_states=env.spec.num_states,
+        num_actions=env.num_actions,
+        obs_backend=args.obs_backend,
+    ).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     writer = make_writer(bool(args.use_tensorboard), output_dir / "tensorboard")
     logger = TrainLogger(
@@ -60,6 +81,7 @@ def train(config: dict, output_dir):
     obs, info = env.reset(seed=args.seed)
     done = False
     episode_actions: list[int] = []
+    episode_metric_series = [env.transition_metrics(info)]
     episode_return = 0.0
     episode_length = 0
     episode_number = 0
@@ -85,6 +107,7 @@ def train(config: dict, output_dir):
             reward_buffer[step] = reward
             global_step += 1
             episode_actions.append(int(action.item()))
+            episode_metric_series.append(env.transition_metrics(next_info))
             episode_return += reward
             episode_length += 1
             done = terminated or truncated
@@ -92,7 +115,23 @@ def train(config: dict, output_dir):
             info = next_info
 
             if done:
-                logger.log_episode(episode_number + 1, episode_return, episode_length, global_step, episode_actions)
+                outcome = env.episode_metrics(
+                    total_reward=episode_return,
+                    final_info=info,
+                    transition_metrics=episode_metric_series,
+                )
+                logger.log_episode(
+                    episode_number + 1,
+                    episode_return,
+                    episode_length,
+                    global_step,
+                    episode_actions,
+                    success=bool(outcome["success"]),
+                    action_distance=env.action_distance,
+                    action_is_abrupt=env.action_is_abrupt,
+                    transition_metrics=episode_metric_series,
+                    outcome=outcome,
+                )
                 score = recent_window_mean(logger.returns)
                 if score >= best_score:
                     best_score = score
@@ -103,6 +142,7 @@ def train(config: dict, output_dir):
                 obs, info = env.reset(seed=args.seed + episode_number)
                 done = False
                 episode_actions = []
+                episode_metric_series = [env.transition_metrics(info)]
                 episode_return = 0.0
                 episode_length = 0
 
@@ -182,8 +222,14 @@ def train(config: dict, output_dir):
 
 
 def load_policy(config: dict, checkpoint: dict):
-    env = ICUSepsisEnvWrapper(obs_backend="discrete_id")
-    agent = TabularActorCritic(env.num_states, env.num_actions).to(get_torch_device())
+    env = make_env(config, obs_backend=config["obs_backend"])
+    agent = build_actor_critic(
+        config,
+        obs_dim=env.obs_dim,
+        num_states=env.spec.num_states,
+        num_actions=env.num_actions,
+        obs_backend=config["obs_backend"],
+    ).to(get_torch_device())
     agent.load_state_dict(checkpoint["model_state_dict"])
     agent.eval()
     env.close()

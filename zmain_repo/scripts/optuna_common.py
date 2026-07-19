@@ -30,12 +30,15 @@ def objective_metric(output_dir: Path) -> float:
     eval_summary_path = output_dir / "eval_summary.json"
     metrics_summary_path = output_dir / "metrics_summary.json"
     if eval_summary_path.exists():
-        return float(load_json(eval_summary_path)["mean_survival"])
+        summary = load_json(eval_summary_path)
+        return float(summary.get("mean_success", summary["mean_survival"]))
     if metrics_summary_path.exists():
         summary = load_json(metrics_summary_path)
         if "eval_summary" in summary:
-            return float(summary["eval_summary"]["mean_survival"])
-        return float(summary["train_summary"]["final_survival_rate"])
+            evaluation = summary["eval_summary"]
+            return float(evaluation.get("mean_success", evaluation["mean_survival"]))
+        training = summary["train_summary"]
+        return float(training.get("final_success_rate", training["final_survival_rate"]))
     raise FileNotFoundError(f"No summary metrics found in {output_dir}")
 
 

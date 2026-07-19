@@ -1,0 +1,15 @@
+{
+  "dataset_name": "epicare_smart_final_100000",
+  "env_id": "epicare",
+  "environment_seed": 1,
+  "env_kwargs": {"patient_modifiers": true},
+  "obs_backend": "state_vector",
+  "output_dir": "datasets/offline/epicare/final/smart/100000",
+  "behavior_policy": "smart",
+  "seed": 0,
+  "num_train_episodes": 100000,
+  "num_val_episodes": 10000,
+  "num_ope_episodes": 20000,
+  "ope_enabled": true,
+  "overwrite": false
+}

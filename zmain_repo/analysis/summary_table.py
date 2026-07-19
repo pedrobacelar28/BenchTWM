@@ -12,6 +12,7 @@ sys.path.append(os.getcwd())
 from analysis.utils import find_best, get_reference_stats, save_dataframe
 from src.utils.json_handling import get_sorted_dict
 from src.utils.methods import method_id, train_mode
+from src.envs.factory import environment_id
 
 
 if __name__ == "__main__":
@@ -28,6 +29,7 @@ if __name__ == "__main__":
         threshold_metric = "steps_to_threshold" if train_mode(params) == "offline" and "steps_to_threshold" in payload["summary"] else "episodes_to_threshold"
         rows.append(
             {
+                "env_id": environment_id(params),
                 "algo": method_id(params),
                 "auc_return": float(payload["summary"]["auc_return"]["mean"]),
                 "final_return": float(payload["summary"]["final_return"]["mean"]),
@@ -38,9 +40,10 @@ if __name__ == "__main__":
             }
         )
 
-    refs = get_reference_stats()
-    rows.append({"algo": "expert", "auc_return": refs["expert_policy"]["j_mean"], "final_return": refs["expert_policy"]["j_mean"], "best_eval_return": refs["expert_policy"]["j_mean"], "budget_to_threshold": 0, "action_stability_l1": 0.0, "abrupt_jump_rate": 0.0})
-    rows.append({"algo": "optimal", "auc_return": refs["pi_star"]["j_mean"], "final_return": refs["pi_star"]["j_mean"], "best_eval_return": refs["pi_star"]["j_mean"], "budget_to_threshold": 0, "action_stability_l1": 0.0, "abrupt_jump_rate": 0.0})
+    if rows and all(row["env_id"] == "icu_sepsis" for row in rows):
+        refs = get_reference_stats()
+        rows.append({"env_id": "icu_sepsis", "algo": "expert", "auc_return": refs["expert_policy"]["j_mean"], "final_return": refs["expert_policy"]["j_mean"], "best_eval_return": refs["expert_policy"]["j_mean"], "budget_to_threshold": 0, "action_stability_l1": 0.0, "abrupt_jump_rate": 0.0})
+        rows.append({"env_id": "icu_sepsis", "algo": "optimal", "auc_return": refs["pi_star"]["j_mean"], "final_return": refs["pi_star"]["j_mean"], "best_eval_return": refs["pi_star"]["j_mean"], "budget_to_threshold": 0, "action_stability_l1": 0.0, "abrupt_jump_rate": 0.0})
     df = pd.DataFrame(rows)
     save_dataframe(df, "plots/summary_table.csv")
     print(df.to_string(index=False))

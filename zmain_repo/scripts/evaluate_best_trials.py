@@ -20,19 +20,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import torch
-from tqdm.auto import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.algorithms.registry import get_policy_loader
-from src.envs.icu_adapter import ICUSepsisEnvWrapper
+from src.evaluation import evaluate_policy
 from src.utils.io import ensure_dir
-from src.utils.metrics import action_stability
-from src.utils.methods import method_id
 
 
 # =========================
@@ -69,7 +65,6 @@ MODEL_GROUPS = {
 
 EXPORT_TRAJECTORIES = False
 SHOW_PROGRESS = True
-PROGRESS_INTERVAL = 1_000
 OVERWRITE = False
 
 
@@ -242,129 +237,18 @@ def _evaluate_policy_with_progress(
     progress_desc: str,
 ) -> dict[str, Any]:
     ensure_dir(output_dir)
-    env = ICUSepsisEnvWrapper(obs_backend=config["obs_backend"])
-    method = method_id(config)
-    trajectories: list[dict[str, Any]] = []
-    episodes: list[dict[str, Any]] = []
-    progress_path = output_dir / "progress.json"
-
-    iterator = tqdm(
-        range(num_episodes),
-        desc=progress_desc,
-        unit="ep",
-        dynamic_ncols=True,
-        disable=not SHOW_PROGRESS,
-        file=sys.stdout,
+    return evaluate_policy(
+        policy,
+        config=config,
+        num_episodes=num_episodes,
+        eval_seed_base=eval_seed_base,
+        output_dir=output_dir,
+        checkpoint_name=checkpoint_name,
+        export_csv=export_csv,
+        show_progress=SHOW_PROGRESS,
+        progress_desc=progress_desc,
     )
-    survived_count = 0
-    for episode_id in iterator:
-        obs, info = env.reset(seed=eval_seed_base + episode_id)
-        done = False
-        total_reward = 0.0
-        step_idx = 0
-        actions = []
-        sofas = [float(info["sofa_score"])]
-        initial_state = int(info["state_id"])
-        initial_sofa = float(info["sofa_score"])
-        episode_start_idx = len(trajectories)
 
-        while not done:
-            with torch.inference_mode():
-                action = int(policy.act(obs, info, deterministic=True))
-            next_obs, reward, terminated, truncated, next_info = env.step(action)
-            done = terminated or truncated
-            actions.append(action)
-            trajectories.append(
-                {
-                    "method": method,
-                    "algo": config["algo"],
-                    "method_id": method,
-                    "seed": int(config["seed"]),
-                    "eval_seed": int(eval_seed_base + episode_id),
-                    "checkpoint": checkpoint_name,
-                    "episode_id": int(episode_id),
-                    "t": int(step_idx),
-                    "state_id": int(info["state_id"]),
-                    "sofa_score": float(info["sofa_score"]),
-                    "action_idx": int(action),
-                    "fluid_bin": int(env.decode_action(action)[0]),
-                    "vaso_bin": int(env.decode_action(action)[1]),
-                    "reward": float(reward),
-                    "done": bool(done),
-                    "survived": False,
-                    **(
-                        {f"state_vector_{i}": float(value) for i, value in enumerate(info["state_vector"])}
-                        if config["obs_backend"] == "state_vector"
-                        else {}
-                    ),
-                }
-            )
-            total_reward += float(reward)
-            obs = next_obs
-            info = next_info
-            sofas.append(float(info["sofa_score"]))
-            step_idx += 1
-
-        survived = bool(total_reward > 0)
-        survived_count += int(survived)
-        stability_l1, abrupt_rate = action_stability(actions)
-        episodes.append(
-            {
-                "method": method,
-                "algo": config["algo"],
-                "method_id": method,
-                "seed": int(config["seed"]),
-                "eval_seed": int(eval_seed_base + episode_id),
-                "checkpoint": checkpoint_name,
-                "episode_id": int(episode_id),
-                "return": float(total_reward),
-                "survived": survived,
-                "length": int(step_idx),
-                "initial_state": initial_state,
-                "initial_sofa": initial_sofa,
-                "mean_sofa": float(sum(sofas) / len(sofas)),
-                "action_stability_l1": stability_l1,
-                "abrupt_jump_rate": abrupt_rate,
-            }
-        )
-        for row in trajectories[episode_start_idx:]:
-            row["survived"] = survived
-
-        completed = episode_id + 1
-        running_survival = survived_count / completed
-        if SHOW_PROGRESS:
-            iterator.set_postfix(surv=f"{running_survival:.4f}", len=step_idx, rows=len(trajectories))
-        if completed == 1 or completed % PROGRESS_INTERVAL == 0 or completed == num_episodes:
-            _write_json(
-                progress_path,
-                {
-                    "status": "running" if completed < num_episodes else "complete",
-                    "completed_episodes": completed,
-                    "total_episodes": num_episodes,
-                    "eval_seed_base": eval_seed_base,
-                    "last_eval_seed": int(eval_seed_base + episode_id),
-                    "running_mean_survival": running_survival,
-                    "trajectory_rows": len(trajectories),
-                },
-            )
-
-    env.close()
-    episodes_df = pd.DataFrame(episodes)
-    trajectories_df = pd.DataFrame(trajectories)
-    if export_csv:
-        episodes_df.to_csv(output_dir / "episodes_summary.csv", index=False)
-        trajectories_df.to_csv(output_dir / "trajectories.csv", index=False)
-    return {
-        "episodes": episodes_df,
-        "trajectories": trajectories_df,
-        "summary": {
-            "mean_return": float(episodes_df["return"].mean()) if not episodes_df.empty else 0.0,
-            "mean_survival": float(episodes_df["survived"].mean()) if not episodes_df.empty else 0.0,
-            "mean_length": float(episodes_df["length"].mean()) if not episodes_df.empty else 0.0,
-            "mean_action_stability_l1": float(episodes_df["action_stability_l1"].mean()) if not episodes_df.empty else 0.0,
-            "mean_abrupt_jump_rate": float(episodes_df["abrupt_jump_rate"].mean()) if not episodes_df.empty else 0.0,
-        },
-    }
 
 
 def evaluate_model_dir(model_dir: Path, output_root: Path) -> dict[str, Any]:

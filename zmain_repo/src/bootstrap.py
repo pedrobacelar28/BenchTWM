@@ -9,6 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VENDORED_ICU_PACKAGES_ROOT = PROJECT_ROOT / "third_party" / "icu-sepsis" / "packages"
 SIBLING_ICU_PACKAGES_ROOT = PROJECT_ROOT.parent / "icu-sepsis" / "packages"
+VENDORED_EPICARE_ROOT = PROJECT_ROOT / "third_party" / "epicare"
 
 
 def _package_root(package_name: str) -> Path:
@@ -32,3 +33,7 @@ def bootstrap_icu_sepsis() -> None:
 def bootstrap_icu_helpers() -> None:
     bootstrap_icu_sepsis()
     _prepend_path(_package_root("icu_sepsis_helpers"))
+
+
+def bootstrap_epicare() -> None:
+    _prepend_path(VENDORED_EPICARE_ROOT)

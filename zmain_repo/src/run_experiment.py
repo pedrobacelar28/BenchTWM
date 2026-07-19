@@ -10,6 +10,7 @@ import torch
 
 from src.algorithms.registry import get_policy_loader, get_trainer_for_mode
 from src.evaluation import evaluate_policy
+from src.offline.ope import evaluate_ope, export_ope
 from src.utils.formatting import output_dir_for_experiment
 from src.utils.io import ensure_dir, load_json, load_pickle, save_json, save_pickle
 from src.utils.methods import method_id, train_mode
@@ -37,12 +38,15 @@ def _flatten_summary(prefix: str, values: dict) -> dict:
 
 
 def _save_training_history(metrics: dict, output_dir: Path) -> None:
+    success_rate = np.asarray(metrics.get("success_rate", metrics["survival_rate"]), dtype=np.float32)
     columns = {
         "episode": np.arange(1, len(metrics["returns"]) + 1, dtype=np.int32),
         "return": np.asarray(metrics["returns"], dtype=np.float32),
         "discounted_return": np.asarray(metrics["discounted_returns"], dtype=np.float32),
         "episode_length": np.asarray(metrics["episode_length"], dtype=np.int32),
         "total_steps": np.asarray(metrics["total_steps"], dtype=np.int32),
+        "success_rate": success_rate,
+        # Backward-compatible ICU alias. New consumers should use success_rate.
         "survival_rate": np.asarray(metrics["survival_rate"], dtype=np.float32),
         "action_stability_l1": np.asarray(metrics["action_stability_l1"], dtype=np.float32),
         "abrupt_jump_rate": np.asarray(metrics["abrupt_jump_rate"], dtype=np.float32),
@@ -50,6 +54,8 @@ def _save_training_history(metrics: dict, output_dir: Path) -> None:
     for optional_key in ["offline_updates", "offline_sampled_transitions"]:
         if optional_key in metrics:
             columns[optional_key] = np.asarray(metrics[optional_key], dtype=np.int32)
+    for name, values in metrics.get("environment_metrics", {}).items():
+        columns[f"env_{name}"] = np.asarray(values, dtype=np.float32)
     history_df = pd.DataFrame(columns)
     history_df.to_csv(output_dir / "training_history.csv", index=False)
 
@@ -90,14 +96,17 @@ def _load_eval_summary_from_export(output_dir: Path) -> dict | None:
     if episodes_df.empty:
         return {
             "mean_return": 0.0,
+            "mean_success": 0.0,
             "mean_survival": 0.0,
             "mean_length": 0.0,
             "mean_action_stability_l1": 0.0,
             "mean_abrupt_jump_rate": 0.0,
         }
+    success_column = "success" if "success" in episodes_df else "survived"
     return {
         "mean_return": float(episodes_df["return"].mean()),
-        "mean_survival": float(episodes_df["survived"].mean()),
+        "mean_success": float(episodes_df[success_column].mean()),
+        "mean_survival": float(episodes_df[success_column].mean()),
         "mean_length": float(episodes_df["length"].mean()),
         "mean_action_stability_l1": float(episodes_df["action_stability_l1"].mean()),
         "mean_abrupt_jump_rate": float(episodes_df["abrupt_jump_rate"].mean()),
@@ -106,6 +115,7 @@ def _load_eval_summary_from_export(output_dir: Path) -> dict | None:
 
 def _save_readable_metrics(params: dict, metrics: dict, output_dir: Path, eval_summary: dict | None) -> None:
     extra_summary = _summarize_extra_metrics(metrics["extra_metrics"])
+    environment_metric_summary = _summarize_extra_metrics(metrics.get("environment_metrics", {}))
     payload = {
         "algo": params["algo"],
         "method_id": method_id(params),
@@ -113,6 +123,7 @@ def _save_readable_metrics(params: dict, metrics: dict, output_dir: Path, eval_s
         "seed": int(params["seed"]),
         "train_summary": metrics["summary"],
         "extra_metrics_summary": extra_summary,
+        "environment_metrics_summary": environment_metric_summary,
     }
     if eval_summary is not None:
         payload["eval_summary"] = eval_summary
@@ -128,6 +139,9 @@ def _save_readable_metrics(params: dict, metrics: dict, output_dir: Path, eval_s
     for name, values in extra_summary.items():
         for stat_name, stat_value in values.items():
             flat_summary[f"extra_{name}_{stat_name}"] = stat_value
+    for name, values in environment_metric_summary.items():
+        for stat_name, stat_value in values.items():
+            flat_summary[f"train_env_{name}_{stat_name}"] = stat_value
     if eval_summary is not None:
         flat_summary.update(_flatten_summary("eval", eval_summary))
         save_json(eval_summary, output_dir / "eval_summary.json")
@@ -191,6 +205,17 @@ def run_experiment(params: dict, force_run: bool = False):
             show_progress=bool(params.get("show_progress", True)),
             progress_desc="final_eval",
         )
+        if bool(params.get("ope_enabled", False)) and params.get("ope_dataset_path"):
+            ope_summary, ope_bootstrap = evaluate_ope(
+                policy,
+                dataset_path=params["ope_dataset_path"],
+                obs_backend=params["obs_backend"],
+                gamma=float(params.get("gamma", 1.0)),
+                bootstrap_replicates=int(params.get("ope_bootstrap_replicates", 200)),
+                seed=int(params.get("seed", 0)),
+                deterministic=bool(params.get("eval_deterministic", True)),
+            )
+            export_ope(ope_summary, ope_bootstrap, output_dir)
     eval_summary = None if eval_result is None else eval_result["summary"]
     _save_readable_metrics(params, result["metrics"], output_dir, eval_summary)
     print(f"Finished run: {output_dir}")

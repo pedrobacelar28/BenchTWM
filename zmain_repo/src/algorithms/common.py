@@ -48,9 +48,12 @@ class TrainLogger:
     discounted_returns: list[float] = field(default_factory=list)
     num_steps: list[int] = field(default_factory=list)
     total_steps: list[int] = field(default_factory=list)
+    success_rate: list[float] = field(default_factory=list)
+    # Retained for compatibility with historical ICU artifacts. It mirrors success_rate.
     survival_rate: list[float] = field(default_factory=list)
     action_stability_l1: list[float] = field(default_factory=list)
     abrupt_jump_rate: list[float] = field(default_factory=list)
+    environment_metrics: dict[str, list[float]] = field(default_factory=dict)
     extra_metrics: dict[str, list[float]] = field(default_factory=dict)
     progress: object | None = field(init=False, default=None)
 
@@ -66,19 +69,62 @@ class TrainLogger:
             disable=not (self.show_progress and sys.stderr.isatty()),
         )
 
-    def log_episode(self, episode_idx: int, total_reward: float, episode_length: int, total_env_steps: int, actions: list[int]) -> None:
+    def _record_environment_metrics(self, values: dict[str, float]) -> None:
+        """Append a rectangular, environment-declared metric row for one episode."""
+
+        previous_episodes = len(self.returns) - 1
+        for name in values:
+            if name not in self.environment_metrics:
+                self.environment_metrics[name] = [float("nan")] * previous_episodes
+        for name, series in self.environment_metrics.items():
+            series.append(float(values.get(name, float("nan"))))
+
+    def log_episode(
+        self,
+        episode_idx: int,
+        total_reward: float,
+        episode_length: int,
+        total_env_steps: int,
+        actions: list[int],
+        *,
+        success: bool | None = None,
+        action_distance=None,
+        action_is_abrupt=None,
+        transition_metrics: list[dict[str, float]] | None = None,
+        outcome: dict[str, float | bool] | None = None,
+    ) -> None:
         self.returns.append(float(total_reward))
         self.discounted_returns.append(float(total_reward * (self.gamma ** max(0, episode_length - 1))))
         self.num_steps.append(int(episode_length))
         self.total_steps.append(int(total_env_steps))
-        self.survival_rate.append(float(total_reward > 0))
-        stability_l1, abrupt_rate = action_stability(actions)
+        success_value = float(total_reward > 0.0) if success is None else float(bool(success))
+        self.success_rate.append(success_value)
+        self.survival_rate.append(success_value)
+        stability_l1, abrupt_rate = action_stability(
+            actions,
+            distance_fn=action_distance,
+            abrupt_threshold=0.5,
+            abrupt_fn=action_is_abrupt,
+        )
         self.action_stability_l1.append(stability_l1)
         self.abrupt_jump_rate.append(abrupt_rate)
+        metric_values: dict[str, float] = {}
+        if transition_metrics:
+            for name in sorted({key for row in transition_metrics for key in row}):
+                values = [float(row[name]) for row in transition_metrics if name in row]
+                if values:
+                    metric_values[f"initial_{name}"] = values[0]
+                    metric_values[f"mean_{name}"] = float(np.mean(values))
+                    metric_values[f"final_{name}"] = values[-1]
+        for name, value in (outcome or {}).items():
+            if name not in {"success", "survived"} and isinstance(value, (bool, int, float, np.number)):
+                metric_values[f"outcome_{name}"] = float(value)
+        self._record_environment_metrics(metric_values)
         if self.writer is not None:
             self.writer.add_scalar("charts/episodic_return", total_reward, episode_idx)
             self.writer.add_scalar("charts/episodic_length", episode_length, episode_idx)
             self.writer.add_scalar("charts/total_steps", total_env_steps, episode_idx)
+            self.writer.add_scalar("charts/episodic_success", success_value, episode_idx)
             self.writer.add_scalar("charts/action_stability_l1", stability_l1, episode_idx)
             self.writer.add_scalar("charts/abrupt_jump_rate", abrupt_rate, episode_idx)
         if self.progress is not None:
@@ -86,6 +132,7 @@ class TrainLogger:
             self.progress.set_postfix(
                 ret=f"{total_reward:.3f}",
                 avg20=f"{recent_window_mean(self.returns):.3f}",
+                success=f"{success_value:.0f}",
                 length=int(episode_length),
                 steps=int(total_env_steps),
             )
@@ -103,6 +150,7 @@ class TrainLogger:
             action_stability_l1=self.action_stability_l1,
             abrupt_jump_rate=self.abrupt_jump_rate,
             threshold=self.success_threshold,
+            success_rates=self.success_rate,
         )
         return {
             "returns": np.asarray(self.returns, dtype=np.float32),
@@ -110,9 +158,14 @@ class TrainLogger:
             "num_steps": np.asarray(self.num_steps, dtype=np.int32),
             "episode_length": np.asarray(self.num_steps, dtype=np.int32),
             "total_steps": np.asarray(self.total_steps, dtype=np.int32),
+            "success_rate": np.asarray(self.success_rate, dtype=np.float32),
             "survival_rate": np.asarray(self.survival_rate, dtype=np.float32),
             "action_stability_l1": np.asarray(self.action_stability_l1, dtype=np.float32),
             "abrupt_jump_rate": np.asarray(self.abrupt_jump_rate, dtype=np.float32),
+            "environment_metrics": {
+                key: np.asarray(values, dtype=np.float32)
+                for key, values in self.environment_metrics.items()
+            },
             "extra_metrics": {
                 key: np.asarray(values, dtype=np.float32)
                 for key, values in self.extra_metrics.items()

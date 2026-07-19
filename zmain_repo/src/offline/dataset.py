@@ -26,8 +26,6 @@ REQUIRED_ARRAYS = {
     "behavior_policy_ids",
     "episode_ids",
     "timesteps",
-    "sofa_scores",
-    "next_sofa_scores",
 }
 
 

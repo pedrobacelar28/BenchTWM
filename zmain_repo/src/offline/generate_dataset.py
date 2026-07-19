@@ -15,7 +15,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.algorithms.registry import get_policy_loader
 from src.bootstrap import bootstrap_icu_helpers
-from src.envs.icu_adapter import ICUSepsisEnvWrapper
+from src.envs.factory import environment_id, make_env
 from src.utils.io import ensure_dir, load_json, save_json
 from src.utils.json_handling import get_param_iterable
 from src.utils.metrics import action_stability
@@ -27,6 +27,10 @@ POLICY_IDS = {
     "optimal": 2,
     "epsilon_expert": 3,
     "policy_checkpoint": 4,
+    "random": 10,
+    "smart": 11,
+    "soc": 12,
+    "oracle": 13,
 }
 
 
@@ -59,7 +63,7 @@ def _sample_from_probs(rng: np.random.Generator, probs: np.ndarray) -> tuple[int
     return action, float(math.log(max(probs[action], 1e-12)))
 
 
-def _build_optimal_policy(env: ICUSepsisEnvWrapper, config: dict) -> np.ndarray:
+def _build_optimal_policy(env, config: dict) -> np.ndarray:
     bootstrap_icu_helpers()
     from icu_sepsis_helpers.utils.mdp import value_iteration
 
@@ -88,7 +92,7 @@ def _load_checkpoint_policy(config: dict):
 
 
 class BehaviorPolicy:
-    def __init__(self, config: dict, env: ICUSepsisEnvWrapper):
+    def __init__(self, config: dict, env):
         self.config = config
         self.rng = np.random.default_rng(int(config["seed"]))
         self.num_actions = env.num_actions
@@ -109,6 +113,12 @@ class BehaviorPolicy:
         probs = np.asarray([weights[name] for name in names], dtype=np.float64)
         probs = probs / probs.sum()
         return str(self.rng.choice(names, p=probs))
+
+    def start_episode(self, episode_policy: str) -> None:
+        del episode_policy
+
+    def observe(self, action: int, reward: float) -> None:
+        del action, reward
 
     def action(self, episode_policy: str, obs, info: dict) -> tuple[int, float, int]:
         admissible = list(info["admissible_actions"])
@@ -143,7 +153,62 @@ class BehaviorPolicy:
         return action, logprob, POLICY_IDS[episode_policy]
 
 
-def _empty_buffers() -> dict[str, list]:
+class EpiCareBehaviorPolicy:
+    """Samples EpiCare reference policies while recording exact propensities."""
+
+    def __init__(self, config: dict, env):
+        from epicare.policies import ClinicalTrial, Oracle, Random, StandardOfCare
+
+        self.config = config
+        self.rng = np.random.default_rng(int(config["seed"]))
+        factories = {
+            "random": Random,
+            "smart": ClinicalTrial,
+            "soc": StandardOfCare,
+            "oracle": Oracle,
+        }
+        requested = {str(config["behavior_policy"])}
+        requested.update(str(key) for key in config.get("mixed_weights", {}).keys())
+        unsupported = sorted(requested - set(factories) - {"mixed"})
+        if unsupported:
+            raise ValueError(f"Unsupported EpiCare behavior policies: {unsupported}")
+        self.policies = {name: factories[name](env.env) for name in requested if name != "mixed"}
+        self.current_policy = None
+
+    def choose_episode_policy(self) -> str:
+        policy = str(self.config["behavior_policy"])
+        if policy != "mixed":
+            return policy
+        weights = self.config.get("mixed_weights")
+        if not weights:
+            raise ValueError("EpiCare mixed behavior requires mixed_weights")
+        names = list(weights)
+        probs = np.asarray([weights[name] for name in names], dtype=np.float64)
+        probs /= probs.sum()
+        return str(self.rng.choice(names, p=probs))
+
+    def start_episode(self, episode_policy: str) -> None:
+        self.current_policy = self.policies[episode_policy]
+        self.current_policy.reset()
+
+    def action(self, episode_policy: str, obs, info: dict) -> tuple[int, float, int]:
+        del info
+        policy = self.policies[episode_policy]
+        probs = np.asarray(policy.get_treatment_probs(obs), dtype=np.float64)
+        probs /= probs.sum()
+        action, logprob = _sample_from_probs(self.rng, probs)
+        return action, logprob, POLICY_IDS[episode_policy]
+
+    def observe(self, action: int, reward: float) -> None:
+        if self.current_policy is not None:
+            self.current_policy.update(int(action), float(reward))
+
+
+def _make_behavior(config: dict, env):
+    return EpiCareBehaviorPolicy(config, env) if env.spec.env_id == "epicare" else BehaviorPolicy(config, env)
+
+
+def _empty_buffers(metric_names: tuple[str, ...]) -> dict[str, list]:
     return {
         "observations": [],
         "next_observations": [],
@@ -161,8 +226,9 @@ def _empty_buffers() -> dict[str, list]:
         "behavior_policy_ids": [],
         "episode_ids": [],
         "timesteps": [],
-        "sofa_scores": [],
-        "next_sofa_scores": [],
+        "env_metrics": [],
+        "next_env_metrics": [],
+        **({"sofa_scores": [], "next_sofa_scores": []} if metric_names == ("sofa_score",) else {}),
     }
 
 
@@ -178,30 +244,34 @@ def _append_episode(buffers: dict[str, list], episode_records: list[dict]) -> No
 def _collect_split(
     *,
     config: dict,
-    env: ICUSepsisEnvWrapper,
-    behavior: BehaviorPolicy,
+    env,
+    behavior,
     num_episodes: int,
     start_episode_id: int,
     seed_offset: int,
 ) -> tuple[dict[str, list], list[dict]]:
-    buffers = _empty_buffers()
+    metric_names = env.spec.metric_names
+    buffers = _empty_buffers(metric_names)
     summaries: list[dict] = []
     for local_episode in trange(num_episodes, desc=f"collect_{seed_offset}", dynamic_ncols=True):
         episode_id = start_episode_id + local_episode
         obs, info = env.reset(seed=int(config["seed"]) + seed_offset + local_episode)
         episode_policy = behavior.choose_episode_policy()
+        behavior.start_episode(episode_policy)
         done = False
         total_reward = 0.0
         t = 0
         episode_records: list[dict] = []
         episode_actions: list[int] = []
-        sofas = [float(info["sofa_score"])]
+        metric_values = [env.transition_metrics(info)]
         initial_state = int(info["state_id"])
-        initial_sofa = float(info["sofa_score"])
         while not done:
             action, logprob, policy_id = behavior.action(episode_policy, obs, info)
             next_obs, reward, terminated, truncated, next_info = env.step(action)
+            behavior.observe(action, reward)
             done = terminated or truncated
+            current_metrics = env.transition_metrics(info)
+            next_metrics = env.transition_metrics(next_info)
             episode_records.append(
                 {
                     "observations": np.asarray(obs, dtype=np.float32),
@@ -219,30 +289,47 @@ def _collect_split(
                     "behavior_policy_ids": int(policy_id),
                     "episode_ids": int(episode_id),
                     "timesteps": int(t),
-                    "sofa_scores": float(info["sofa_score"]),
-                    "next_sofa_scores": float(next_info["sofa_score"]),
+                    "env_metrics": np.asarray([current_metrics[name] for name in metric_names], dtype=np.float32),
+                    "next_env_metrics": np.asarray([next_metrics[name] for name in metric_names], dtype=np.float32),
+                    **(
+                        {
+                            "sofa_scores": float(current_metrics["sofa_score"]),
+                            "next_sofa_scores": float(next_metrics["sofa_score"]),
+                        }
+                        if "sofa_score" in current_metrics
+                        else {}
+                    ),
                 }
             )
             episode_actions.append(action)
             total_reward += float(reward)
             obs = next_obs
             info = next_info
-            sofas.append(float(info["sofa_score"]))
+            metric_values.append(next_metrics)
             t += 1
         _append_episode(buffers, episode_records)
-        stability_l1, abrupt_rate = action_stability(episode_actions)
+        stability_l1, abrupt_rate = action_stability(
+            episode_actions,
+            env.action_distance,
+            abrupt_threshold=0.5,
+            abrupt_fn=env.action_is_abrupt,
+        )
+        outcome = env.episode_metrics(total_reward=total_reward, final_info=info, transition_metrics=metric_values)
         summaries.append(
             {
                 "episode_id": episode_id,
                 "behavior_policy": episode_policy,
                 "return": float(total_reward),
-                "survived": bool(total_reward > 0),
+                "success": bool(outcome["success"]),
                 "length": int(t),
                 "initial_state": initial_state,
-                "initial_sofa": initial_sofa,
-                "mean_sofa": float(sum(sofas) / len(sofas)),
                 "action_stability_l1": stability_l1,
                 "abrupt_jump_rate": abrupt_rate,
+                **outcome,
+                **{
+                    f"mean_{name}": float(np.mean([row[name] for row in metric_values]))
+                    for name in metric_names
+                },
             }
         )
     return buffers, summaries
@@ -252,7 +339,7 @@ def _stack_buffers(buffers: dict[str, list]) -> dict[str, np.ndarray]:
     arrays = {}
     for key, values in buffers.items():
         if key in {"observations", "next_observations", "action_masks", "next_action_masks"}:
-            arrays[key] = np.asarray(values, dtype=np.uint8)
+            arrays[key] = np.asarray(values, dtype=np.float32)
         elif key in {"state_vectors", "next_state_vectors"}:
             arrays[key] = np.asarray(values, dtype=np.float32)
         elif key in {"actions", "next_actions", "state_ids", "next_state_ids", "behavior_policy_ids", "episode_ids", "timesteps"}:
@@ -282,7 +369,7 @@ def _summary_stats(summaries: list[dict]) -> dict:
         "num_episodes": int(len(df)),
         "num_transitions": int(df["length"].sum()) if not df.empty else 0,
         "return_mean": float(df["return"].mean()) if not df.empty else 0.0,
-        "survival_rate": float(df["survived"].mean()) if not df.empty else 0.0,
+        "success_rate": float(df["success"].mean()) if not df.empty else 0.0,
         "mean_episode_length": float(df["length"].mean()) if not df.empty else 0.0,
         "behavior_policy_counts": dict(policy_counts),
     }
@@ -303,8 +390,10 @@ def generate_dataset(config: dict) -> dict:
         print(f"Dataset already exists: {output_dir}")
         return load_json(metadata_path)
 
-    env = ICUSepsisEnvWrapper(obs_backend="discrete_id", seed=int(config["seed"]))
-    behavior = BehaviorPolicy(config, env)
+    env_id = environment_id(config)
+    obs_backend = str(config.get("obs_backend", "state_vector" if env_id == "epicare" else "discrete_id"))
+    env = make_env(config, obs_backend=obs_backend, seed=int(config["seed"]))
+    behavior = _make_behavior(config, env)
     train_buffers, train_summaries = _collect_split(
         config=config,
         env=env,
@@ -321,18 +410,40 @@ def generate_dataset(config: dict) -> dict:
         start_episode_id=int(config["num_train_episodes"]),
         seed_offset=int(config["num_train_episodes"]) + 100000,
     )
+    ope_buffers = None
+    ope_summaries = None
+    ope_path = None
+    if bool(config.get("ope_enabled", False)) or int(config.get("num_ope_episodes", 0)) > 0:
+        num_ope_episodes = int(config.get("num_ope_episodes", config.get("num_val_episodes", 0)))
+        if num_ope_episodes <= 0:
+            raise ValueError("ope_enabled requires num_ope_episodes > 0")
+        ope_buffers, ope_summaries = _collect_split(
+            config=config,
+            env=env,
+            behavior=behavior,
+            num_episodes=num_ope_episodes,
+            start_episode_id=int(config["num_train_episodes"]) + int(config["num_val_episodes"]),
+            seed_offset=int(config["num_train_episodes"]) + int(config["num_val_episodes"]) + 200000,
+        )
+        ope_path = Path(config.get("ope_dataset_path", output_dir / "ope_test.npz"))
+        if not ope_path.is_absolute():
+            ope_path = Path.cwd() / ope_path
     env.close()
 
     train_meta = _save_split(train_path, train_buffers)
     val_meta = _save_split(val_path, val_buffers)
-    all_summaries = train_summaries + val_summaries
+    ope_meta = _save_split(ope_path, ope_buffers) if ope_path is not None and ope_buffers is not None else None
+    all_summaries = train_summaries + val_summaries + (ope_summaries or [])
     ensure_dir(output_dir)
     pd.DataFrame(all_summaries).to_csv(episodes_path, index=False)
     metadata = {
         "config": config,
+        "schema_version": 2,
+        "environment": env.spec.to_dict(),
         "policy_ids": POLICY_IDS,
         "train": {**train_meta, **_summary_stats(train_summaries)},
         "validation": {**val_meta, **_summary_stats(val_summaries)},
+        **({"ope_test": {**ope_meta, **_summary_stats(ope_summaries)}} if ope_meta is not None else {}),
         "episodes_summary_path": str(episodes_path),
     }
     save_json(metadata, metadata_path)

@@ -1,0 +1,393 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.78in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\dataset}{\mathcal{D}}
+\newcommand{\policy}{\pi}
+\newcommand{\behavior}{\mu}
+\newcommand{\indicator}{\mathbb{I}}
+\setlist{leftmargin=*,nosep}
+\setlength{\columnsep}{0.24in}
+
+\title{BenchTWM: A Structured Offline Reinforcement Learning Suite\\
+for Healthcare-Oriented World-Model Benchmarks}
+\author{Technical Specification for \code{zmain\_repo}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+BenchTWM is a reproducible suite for structured offline reinforcement learning (RL) and categorical-action world-model research. It integrates two healthcare-oriented simulators behind one adapter and one logged-transition schema: ICU-Sepsis, a finite MDP parameterized from MIMIC-III-derived assets, and EpiCare, a procedurally generated partially observable treatment benchmark. The suite is deliberately an integration rather than a reproduction of either source paper. It supplies fixed logged datasets, local DQN and PPO implementations, three local world-model families with cross-entropy method (CEM) planning, direct simulator evaluation, and importance-sampling off-policy evaluation (OPE). This specification defines the exact observation, action, dataset, optimization, and evaluation contracts used by the repository. It reports no empirical results and makes no clinical claims.
+\end{abstract}
+
+\section{Scope and Design Principles}
+\label{sec:scope}
+
+Offline RL optimizes a policy from a fixed log of decisions. Its central engineering requirement is therefore to keep three objects distinct: the log used for optimization, held-out logged data used for validation or OPE, and simulator episodes used for direct benchmark evaluation. BenchTWM makes that separation explicit. A typical offline run consumes \code{train.npz} and \code{val.npz}; it selects a checkpoint by validation loss; it evaluates that checkpoint in fresh simulator episodes; and, only when configured, it computes OPE from a separate \code{ope\_test.npz}. OPE never selects the checkpoint.
+
+The suite has four design goals:
+\begin{enumerate}
+    \item \textbf{Multi-environment compatibility.} A policy sees a common observation tensor, a categorical action mask, and adapter-defined metrics. Environment-specific latent state remains diagnostic data rather than an accidental agent input.
+    \item \textbf{Offline-first operation.} Dataset provenance, behavior-policy propensities, trajectory identity, and split separation are first-class artifacts.
+    \item \textbf{Method transparency.} The five implemented algorithm families are documented by their local objectives and network interfaces, rather than being conflated with algorithms mentioned in upstream papers.
+    \item \textbf{Comparable reporting without false equivalence.} Return, success, episode length, action-change measures, and data-quality diagnostics are standardized. Clinical semantics, physical units, and primary safety metrics remain environment-specific.
+\end{enumerate}
+
+The suite is a benchmark engineering artifact, not a clinical decision-support system. ICU-Sepsis and EpiCare are simulators; direct simulator performance, OPE estimates, and learned policies must not be interpreted as treatment recommendations.
+
+\section{Notation and System Contract}
+\label{sec:contract}
+
+At step $t$, an adapter returns an observation $o_t \in \R^{d_o}$, an information dictionary, and a binary action mask $m_t \in \{0,1\}^{A}$. The policy selects an integer categorical action $a_t \in \{0,\ldots,A-1\}$. A transition is
+\begin{equation}
+    (o_t, a_t, r_t, o_{t+1}, d_t, m_t, m_{t+1}),
+\end{equation}
+where $d_t$ is the terminal indicator. The adapter also supplies a continuous vector representation $x_t$ when it differs from the canonical observation, a diagnostic state identifier $s_t$, and named environment metrics $q_t$.
+
+The factory call
+\begin{equation}
+    \code{make\_env(config, obs\_backend, seed)}
+\end{equation}
+instantiates an environment wrapper. Every wrapper exports an \code{EnvSpec}: environment ID, number of actions and states, observation dimensions, supported observation backends, feature names, action labels, action geometry, metric names, and primary metric. This specification is saved with evaluation artifacts, so a report never needs to infer that a 16-way categorical action belongs to EpiCare or that a 25-way action belongs to ICU-Sepsis.
+
+All local policies implement two methods:
+\begin{align}
+    \code{act}(o_t,\mathrm{info},\mathrm{deterministic}) &\rightarrow a_t, \\
+    \code{action\_probabilities}(o_t,\mathrm{info},\mathrm{deterministic}) &\rightarrow p_t \in [0,1]^A.
+\end{align}
+The second method is mandatory for OPE. In deterministic evaluation mode, DQN, PPO, and the CEM world-model policies return a one-hot distribution on their deployed action. In stochastic mode, DQN returns a masked softmax over Q-values, PPO returns its masked categorical distribution, and a CEM policy returns the first-step distribution produced by its planner.
+
+\section{Benchmark Environments}
+\label{sec:environments}
+
+Table~\ref{tab:environments} summarizes the agent-facing contracts. These common fields do \emph{not} make the two environments clinically comparable: ICU success denotes simulated survival while EpiCare success denotes simulated remission.
+
+\begin{table*}[t]
+\centering
+\caption{Environment contracts exposed by BenchTWM. Dimensions refer to the default packaged configurations. \code{state\_id} is diagnostic and is not an input to a policy network.}
+\label{tab:environments}
+\small
+\begin{tabularx}{\textwidth}{lXXXXXX}
+\toprule
+Environment & Source model & Policy observation & Action representation & Action validity & Adapter metrics & Episode success \\
+\midrule
+ICU-Sepsis & finite MDP, 716 states & 716-way one-hot \emph{or} 47-dimensional cluster-center vector & 25 actions, $5 \times 5$ fluid/vasopressor grid & state-dependent mask from upstream asset & \code{sofa\_score} & positive total return; legacy alias \code{survived} \\
+EpiCare & generated POMDP, 16 diseases plus remission & 8-dimensional symptom vector only & 16 categorical treatments & all 16 currently valid & symptom burden, remission, adverse event, time to remission & remission \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{ICU-Sepsis}
+\label{sec:icu}
+
+ICU-Sepsis is a benchmark MDP constructed from real medical data, with source assets derived from approximately 17,000 MIMIC-III sepsis trajectories \cite{choudhary2024icu}. The packaged environment used by this repository has 716 discrete states and 25 actions. The upstream distribution supplies transition and reward matrices, state cluster centers, state-level mean SOFA scores, an expert policy, and state-dependent admissible action sets. BenchTWM does not reconstruct the upstream clustering or estimate new transition matrices; it wraps the packaged simulator.
+
+\paragraph{Action geometry.}
+An action index is decoded as
+\begin{equation}
+    a = 5f + v, \qquad f,v \in \{0,1,2,3,4\},
+\end{equation}
+where $f$ is the fluid bin and $v$ is the vasopressor bin. The action label exported by the adapter is \code{fluids=<f>, vasopressors=<v>}. The vector $m_t$ marks the action indices supported in the current upstream state. Every neural policy applies the mask before selecting an action: invalid logits or Q-values are set to a large negative value. A logged action is checked against its action mask during dataset inspection.
+
+The adapter-defined action distance is Manhattan distance on the grid,
+\begin{equation}
+    \Delta(a,a') = |f-f'| + |v-v'|.
+\end{equation}
+An action change is marked abrupt if either $|f-f'|>1$ or $|v-v'|>1$. These definitions preserve the original ICU-oriented action-stability interpretation; they are not applied to EpiCare treatment labels.
+
+\paragraph{Observations.}
+The \code{discrete\_id} backend maps state $s_t$ to a 716-dimensional one-hot vector. It is the legacy default and permits a tabular-linear parameterization: a linear layer without bias is equivalent to one parameter vector per state. The \code{state\_vector} backend returns the 47-dimensional cluster-center vector supplied by the benchmark. The local adapter names its dimensions \code{state\_vector\_0} through \code{state\_vector\_46}; it does not invent clinical feature labels that are absent from the packaged adapter contract. Both representations are retained in generated datasets whenever possible, permitting a configuration to select the network input explicitly.
+
+\paragraph{Outcomes and metrics.}
+The adapter emits \code{sofa\_score} from the upstream state metadata at each transition. It defines \code{success} as a positive episode return and retains \code{survived} as a compatibility alias. This is a local reporting convention inherited from the benchmark reward semantics; it does not assert that arbitrary positive returns are calibrated survival probabilities.
+
+\paragraph{ICU behavior policies.}
+The dataset generator can use \code{random\_admissible}, \code{expert}, \code{optimal}, \code{epsilon\_expert}, \code{policy\_checkpoint}, or \code{mixed}. Random samples uniformly among currently admissible actions. Expert samples the upstream expert distribution after renormalizing it on admissible actions. Optimal is obtained by value iteration over the packaged MDP and is deterministic. Epsilon-expert mixes the normalized expert distribution with uniform admissible exploration. A mixed dataset chooses one configured behavior policy per episode according to configured mixture weights. The generator records the probability that actually produced every sampled action, not merely the policy name.
+
+\subsection{EpiCare}
+\label{sec:epicare}
+
+EpiCare was introduced as a configurable benchmark for dynamic treatment regimes with partial observability, adverse events, and OPE failure modes \cite{hargrave2024epicare}. BenchTWM vendors the environment and reference policies under their Apache-2.0 license, updates the interface to Gymnasium, and uses it as a configurable benchmark rather than reproducing the source-paper experiments.
+
+\paragraph{Generated POMDP.}
+The default local configurations instantiate 16 latent disease states, 16 treatments, 8 observed symptoms, and a maximum of 8 visits. A remission state is added for diagnostic state indexing, so local \code{state\_id} values range over 17 IDs. A generated disease has a multivariate Gaussian symptom distribution with an orthogonally rotated covariance matrix, a set of treatments with nonzero remission probability, and optional disease cost. A treatment has a base cost, a symptom-modulation vector, and multiplicative modifiers for disease transitions. The disease transition matrix is generated once per environment and is normalized row-wise.
+
+The benchmark is partially observable: the agent receives symptoms, not the current disease ID. Specifically, the returned observation is an 8-vector in $[0,1]^8$, rounded to one decimal place. Before rounding, symptoms are sampled from the current disease distribution, shifted by treatment and patient modifiers, and transformed by the logistic function. BenchTWM accepts only \code{state\_vector} for EpiCare. It writes the latent disease index in \code{state\_ids} for diagnostics and data-integrity analysis, but never passes that value to DQN, PPO, or any world-model network. This prevents information leakage that would convert the POMDP into an observed MDP for an agent.
+
+\paragraph{Seeds and patient variation.}
+The \code{environment\_seed} fixes the generated diseases, treatments, transition matrix, and other POMDP parameters. The Gymnasium \code{reset(seed=...)} seed creates the episode-specific random-number generator, determining the initial disease, symptom draws, and patient modifiers. With the same pair of seeds, reset and subsequent actions reproduce the same episode. The default configurations enable patient modifiers: per-patient transition modifiers, treatment-remission modifiers, an adverse-event threshold modifier, and symptom modifiers. This distinction is essential: changing \code{environment\_seed} changes the benchmark; changing a reset seed samples another patient trajectory from the same benchmark.
+
+\paragraph{Rewards and termination.}
+For treatment $a_t$, the environment first pays a treatment cost. If the action remits the current disease, it terminates with remission reward $r_R=64$ in the default parameterization. Otherwise, the disease transitions, new symptoms are sampled, and symptom burden incurs a cost when symptom rewards are enabled. An adverse event terminates the episode with default reward $r_A=-64$ when a symptom exceeds the patient-adjusted threshold. Episodes truncate at the maximum number of visits. In schematic form,
+\begin{equation}
+ r_t = -c(a_t) - c_D(s_{t+1}) - \lambda \sum_j o_{t+1,j}
+       + r_R\indicator\{\mathrm{remission}\} + r_A\indicator\{\mathrm{adverse}\},
+\end{equation}
+where disease cost is zero in the default \code{use\_disease\_rewards=false} setup. The local adapter reports four transition metrics: \code{symptom\_burden}, the mean of the observed symptom vector; binary \code{remission}; binary \code{adverse\_event}; and \code{time\_to\_remission}, which is $-1$ until remission. An episode succeeds exactly when remission occurs. When no remission occurs, the episode-level time to remission is exported as missing rather than as a false numerical time.
+
+\paragraph{Actions and baselines.}
+Treatment $a\in\{0,\ldots,15\}$ is represented by the scalar integer index and label \code{Treatment <a>}. All treatments are currently marked admissible, so $m_t=\mathbf{1}_{16}$; nevertheless the generic action-mask field is retained so no algorithm needs an EpiCare-specific data path. EpiCare collection can use \code{random}, \code{smart}, \code{soc}, \code{oracle}, or \code{mixed}. Random is uniform. SMART (the local default) uses the ClinicalTrial policy's fixed weighted distribution over treatments, which enforces an 8:1 ratio between the most and least probable treatment. SoC starts from marginal expected-reward values, avoids actions that would increase already high symptoms when possible, and updates its treatment estimates after observed rewards. Oracle selects the highest expected-reward treatment using the latent disease and is therefore a reference upper baseline, not an admissible partially observed deployed policy. In all cases the logged generator samples from the policy's actual categorical distribution and records its exact log propensity.
+
+\paragraph{Relationship to the EpiCare paper.}
+The source paper evaluates BC, DQN, AWAC, EDAC, TD3+BC, IQL, and CQL, including architecture and history-input choices specific to that study \cite{hargrave2024epicare}. BenchTWM does \emph{not} vendor those implementations or claim their results. It exposes EpiCare to the five local families defined in Section~\ref{sec:methods}. In particular, the local EpiCare input is the current 8-symptom vector; it is not a reproduction of source-paper history augmentation.
+
+\section{Offline Dataset Specification}
+\label{sec:data}
+5
+\subsection{Dataset lifecycle and split semantics}
+
+The generator stores immutable compressed NPZ files under a configuration-controlled output directory. Dataset schema version 2 creates at least \code{train.npz} and \code{val.npz}, plus \code{ope\_test.npz} when OPE is enabled. The splits use disjoint episode-ID ranges and non-overlapping reset-seed offsets. Training samples transition minibatches only from \code{train.npz}; validation loss uses \code{val.npz}; OPE consumes only \code{ope\_test.npz}. The accompanying \code{metadata.json} records the complete dataset configuration, environment specification, schema version, behavior-policy ID map, split-level counts, split return and success summaries, and the path to \code{episodes\_summary.csv}.
+
+For each transition, the generator records a behavior-policy identifier and
+\begin{equation}
+    \ell_t^{\behavior} = \log \behavior(a_t\mid o_t).
+\end{equation}
+The value stored in \code{behavior\_logprobs} is the propensity of the action actually sampled in that row. It is finite for all generated rows and is the denominator information needed by the OPE estimators. A deterministic behavior action has log probability zero. The schema intentionally records the sampled action probability even when an episode-level mixture policy chose the behavior-policy family.
+
+\subsection{Arrays and types}
+
+Table~\ref{tab:schema} is the normative local NPZ contract. The first fourteen fields are required by \code{OfflineTransitionDataset}; the remaining fields are generic environment metrics or retained ICU aliases. $N$ denotes transitions in the split, $d_c$ the canonical observation dimension, $d_x$ the continuous-vector dimension, $A$ the number of categorical actions, and $M$ the number of adapter metrics.
+
+\begin{table*}[t]
+\centering
+\caption{BenchTWM NPZ transition schema. All floating arrays use \code{float32}; categorical indices use \code{int64}.}
+\label{tab:schema}
+\small
+\begin{tabularx}{\textwidth}{lclX}
+\toprule
+Array & Shape and type & Required & Meaning \\
+\midrule
+\code{observations}, \code{next\_observations} & $(N,d_c)$ \code{float32} & yes & Canonical adapter observations at $t$ and $t+1$. For ICU discrete mode these are 716-way one-hot vectors; for EpiCare they are 8 symptoms. \\
+\code{state\_vectors}, \code{next\_state\_vectors} & $(N,d_x)$ \code{float32} & for vector mode & Continuous agent input. ICU: 47 cluster-center values. EpiCare: same 8 symptom values as the canonical observation. \\
+\code{actions}, \code{next\_actions} & $(N)$ \code{int64} & yes & Logged categorical action at $t$ and action in the following logged row. \\
+\code{rewards} & $(N)$ \code{float32} & yes & Immediate simulator reward $r_t$. \\
+\code{terminals} & $(N)$ \code{bool} & yes & True when the transition ends or truncates an episode. \\
+\code{state\_ids}, \code{next\_state\_ids} & $(N)$ \code{int64} & yes & Diagnostic simulator state IDs. Not fed to a policy network in EpiCare. \\
+\code{action\_masks}, \code{next\_action\_masks} & $(N,A)$ \code{float32} & yes & $0/1$ validity vectors at $t$ and $t+1$. \\
+\code{behavior\_logprobs} & $(N)$ \code{float32} & yes & $\log\behavior(a_t\mid o_t)$ for OPE and logged PPO-style optimization. \\
+\code{behavior\_policy\_ids} & $(N)$ \code{int64} & yes & Integer provenance key, resolved through \code{metadata.json}. \\
+\code{episode\_ids}, \code{timesteps} & $(N)$ \code{int64} & yes & Trajectory grouping key and stable within-trajectory time index. \\
+\code{env\_metrics}, \code{next\_env\_metrics} & $(N,M)$ \code{float32} & emitted & Named adapter metrics; column order is \code{environment.metric\_names} in metadata. \\
+\code{sofa\_scores}, \code{next\_sofa\_scores} & $(N)$ \code{float32} & ICU only & Legacy SOFA aliases retained for compatibility. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+The offline loader selects its input tensor as follows:
+\begin{equation}
+ z_t =
+ \begin{cases}
+     \code{observations}[t], & \code{obs\_backend=discrete\_id},\\
+     \code{state\_vectors}[t], & \code{obs\_backend=state\_vector}.
+ \end{cases}
+\end{equation}
+It returns a minibatch with $z_t,a_t,r_t,z_{t+1},d_t,m_t,m_{t+1},s_t,s_{t+1},a_{t+1},\ell_t^{\behavior}$. The sequence iterator creates contiguous within-episode windows only; it never crosses terminal boundaries. World-model validation uses those windows for multi-step rollout diagnostics.
+
+\subsection{Data formats in the source repositories}
+
+The schema above is BenchTWM's integration format, not an assertion that its sources use it natively. ICU-Sepsis provides packaged MDP assets such as matrices, policies, cluster centers, SOFA data, and action constraints. EpiCare's upstream data-generation path writes HDF5 datasets with arrays including observations, actions, rewards, terminals, and next observations. BenchTWM does not depend on EpiCare HDF5 files or vendor its source algorithms. It generates its own NPZ logs to add action masks, behavior propensities, episode indices, split metadata, and a common adapter metric contract.
+
+\section{Implemented Algorithms}
+\label{sec:methods}
+
+The repository implements five local families: DQN, PPO, raw dynamics, latent dynamics, and reconstructive latent dynamics. All use categorical actions and respect the first-step action mask. DQN and PPO are policy/value methods. The other three methods learn a one-step world model and use CEM planning at action time. They are separate from the source EpiCare paper's AWAC, EDAC, TD3+BC, IQL, and CQL implementations.
+
+\subsection{Shared parameterizations and masks}
+
+For ICU \code{discrete\_id} input, DQN uses a bias-free linear Q layer and PPO uses bias-free linear actor and critic layers. With one-hot $o_t$, these are tabular parameterizations. For continuous input, DQN uses an MLP ending in $A$ Q-values, while PPO uses separate MLP actor and scalar critic heads. The hidden width and depth are configured by \code{policy\_hidden\_dim} and \code{policy\_hidden\_layers}; EpiCare configurations use MLPs on the 8 symptoms.
+
+For any logits or Q-values $u(o)$, masking is
+\begin{equation}
+    \widetilde{u}_a(o,m) =
+    \begin{cases}
+       u_a(o), & m_a=1,\\
+       -10^9, & m_a=0.
+    \end{cases}
+\end{equation}
+Thus an invalid ICU action cannot be chosen by greedy selection, a PPO categorical distribution, the DQN target maximization, or CEM's first planning step. EpiCare currently supplies an all-ones mask but follows the same path.
+
+\subsection{DQN}
+\label{sec:dqn}
+
+The DQN network estimates $Q_\theta(z,a)$. Both online and offline DQN use a target network $Q_{\bar\theta}$ and a soft target update every configured \code{target\_network\_frequency} steps:
+\begin{equation}
+    \bar\theta \leftarrow \tau\theta + (1-\tau)\bar\theta.
+\end{equation}
+For a minibatch transition, the local squared temporal-difference objective is
+\begin{equation}
+ \mathcal{L}_{\mathrm{DQN}}(\theta) =
+ \frac{1}{B}\sum_{i=1}^{B}
+ \left[Q_\theta(z_i,a_i) - \left(r_i + \gamma(1-d_i)
+ \max_{a':m'_{i,a'}=1}Q_{\bar\theta}(z'_i,a')\right)\right]^2.
+\end{equation}
+Offline DQN samples fixed-size transition minibatches uniformly with replacement from \code{train.npz} and reports the same loss on \code{val.npz}. Online DQN uses a replay buffer, takes a random admissible action with linearly scheduled epsilon probability, and otherwise acts greedily. Its deployed deterministic policy is $\arg\max_a \widetilde Q_\theta(z,a)$. Its stochastic OPE distribution is a masked softmax of Q-values divided by configurable \code{policy\_temperature}; this is a diagnostic distribution, not the epsilon exploration behavior used during online collection.
+
+\subsection{PPO}
+\label{sec:ppo}
+
+PPO uses an actor $\policy_\theta(a\mid z,m)$ and a critic $V_\phi(z)$. In online mode, the implementation collects fixed-horizon rollouts from the simulator, computes generalized advantage estimates using \code{gamma} and \code{gae\_lambda}, and performs minibatch updates with the standard clipped policy ratio. For rollout-policy probability $\policy_{\mathrm{old}}$ and advantage $\hat A_t$,
+\begin{equation}
+ \mathcal{L}_{\mathrm{clip}} = -\min\left(
+ r_t(\theta)\hat A_t,
+ \operatorname{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat A_t
+ \right), \quad
+ r_t(\theta)=\frac{\policy_\theta(a_t\mid z_t)}{\policy_{\mathrm{old}}(a_t\mid z_t)}.
+\end{equation}
+The complete online loss combines policy loss, value loss, and entropy regularization, with gradient-norm clipping.
+
+The offline implementation is intentionally named \emph{logged PPO-style}, rather than claiming the guarantees of on-policy PPO. It uses the recorded behavior propensity:
+\begin{align}
+ \log r_i &= \operatorname{clip}\left(\log\policy_\theta(a_i\mid z_i,m_i)-\ell_i^{\behavior},-10,10\right),\\
+ r_i &= \exp(\log r_i),\\
+ y_i &= r_i^{\mathrm{env}} + \gamma(1-d_i)V_\phi(z'_i),\\
+ \hat A_i &= y_i - V_\phi(z_i).
+\end{align}
+The clipped policy loss uses $r_i$ and $\hat A_i$; the value term is $\frac12(V_\phi(z_i)-y_i)^2$; the behavior-cloning regularizer is $-\log\policy_\theta(a_i\mid z_i,m_i)$; and the total is
+\begin{equation}
+ \mathcal{L}_{\mathrm{logged\ PPO}} =
+ \mathcal{L}_{\mathrm{clip}} + c_V\mathcal{L}_V - c_H\mathcal{H}(\policy_\theta)
+ + c_{BC}\mathcal{L}_{BC}.
+\end{equation}
+The behavior-cloning term is controlled by \code{offline\_bc\_weight}. This procedure is an implementation-defined offline objective, not a replacement for a dedicated conservative offline actor-critic method. Deterministic deployment uses the masked actor argmax; stochastic evaluation uses the masked categorical probabilities.
+
+\subsection{World-model families}
+\label{sec:worldmodels}
+
+All three world models condition on an action embedding $e(a)\in\R^{d_a}$ and predict an immediate reward plus a continuation logit. Let $c_t=1-d_t$. The common auxiliary losses are
+\begin{align}
+ \mathcal{L}_{r} &= \operatorname{MSE}(\hat r_t,r_t),\\
+ \mathcal{L}_{c} &= \operatorname{BCEWithLogits}(\hat c_t,c_t).
+\end{align}
+Their coefficients are \code{reward\_loss\_weight} and \code{continue\_loss\_weight}. For discrete ICU observations, state reconstruction uses cross entropy against \code{next\_state\_ids}; for continuous vectors, it uses mean squared error against the next input vector.
+
+\paragraph{Raw dynamics model.}
+The raw model concatenates $z_t$ and $e(a_t)$, passes them through two hidden layers, and predicts $\hat z_{t+1}$ directly. It also has reward and continuation heads on the same input. Its objective is
+\begin{equation}
+  \mathcal{L}_{\mathrm{raw}} = c_D\mathcal{L}_{\mathrm{dyn}} + c_r\mathcal{L}_r + c_c\mathcal{L}_c,
+\end{equation}
+where $\mathcal{L}_{\mathrm{dyn}}$ is cross entropy for discrete ICU state prediction or MSE for continuous vectors. During a rollout, its predicted next observation is directly the next planning state; discrete logits are softmax-normalized for that purpose.
+
+\paragraph{Latent dynamics model.}
+The latent model encodes $z_t$ into $h_t=E_\theta(z_t)$, predicts $\hat h_{t+1}=F_\theta(h_t,e(a_t))$, and predicts reward and continuation from $(h_t,e(a_t))$. It does not decode observations. The target is a stop-gradient exponential-moving-average encoder $\bar E$:
+\begin{align}
+ \mathcal{L}_{\mathrm{dyn}} &= \operatorname{MSE}(\hat h_{t+1},\bar E(z_{t+1})),\\
+ \bar\theta_E &\leftarrow \delta\bar\theta_E+(1-\delta)\theta_E.
+\end{align}
+The configured \code{target\_encoder\_decay} is $\delta$. This model's state prediction error is latent-space error relative to the target encoder, not an observable-state reconstruction error.
+
+\paragraph{Reconstructive latent dynamics model.}
+The reconstructive model likewise encodes $h_t=E(z_t)$ and predicts $\hat h_{t+1}=F(h_t,e(a_t))$, but also decodes $\hat z_{t+1}=D(\hat h_{t+1})$. Its loss is
+\begin{equation}
+ \mathcal{L}_{\mathrm{recon}} = c_L\operatorname{MSE}(\hat h_{t+1},E(z_{t+1}))
+ + c_R\mathcal{L}_{\mathrm{reconstruction}} + c_r\mathcal{L}_r + c_c\mathcal{L}_c.
+\end{equation}
+The reconstruction loss is discrete cross entropy or continuous MSE according to the observation backend. Unlike the latent model, it exposes a prediction in the original observation space and can therefore report observable reconstruction diagnostics.
+
+\paragraph{World-model validation.}
+For all three families, the primary checkpoint criterion remains one-step validation loss. Additionally, the suite rolls models forward on contiguous held-out windows of lengths $1$, $3$, $5$, and up to the planning horizon. It exports final state error, average reward error, average continuation loss, discounted-return error, and cumulative state error. These diagnose model fit and compounding error. They are neither policy-value estimates nor replacements for direct simulator evaluation.
+
+\subsection{Categorical CEM planning}
+\label{sec:cem}
+
+At action time, a world-model policy plans an action sequence of horizon $H$. The planner initializes independent categorical distributions $p_t(a)$, uniformly except that $p_0$ is multiplied by the current action mask. At each of $I$ CEM iterations it samples $K$ sequences, rolls each sequence through the learned model, and scores it as
+\begin{equation}
+ S(a_{0:H-1}) = \sum_{t=0}^{H-1}\gamma^t
+ \left(\prod_{j<t}\sigma(\hat c_j)\right)\hat r_t.
+\end{equation}
+It retains the top $E$ sequences, forms their per-position empirical categorical frequencies $\hat p_t$, and smooths:
+\begin{equation}
+ p_t \leftarrow \operatorname{normalize}\left(\alpha p_t+(1-\alpha)\hat p_t\right).
+\end{equation}
+The first action of the best sequence is deployed. The planner records its first-step distribution; in deterministic policy evaluation it is converted to a one-hot distribution at the deployed action. CEM's sampling makes planner random-number control important for OPE: a deterministic policy interface should be evaluated under fixed seed semantics when exact repeatability matters.
+
+\section{Optimization, Validation, and Checkpointing}
+\label{sec:training}
+
+Offline configurations are step-based. \code{offline\_train\_steps} specifies optimizer updates; \code{offline\_batch\_size} specifies transitions per update; their product is the nominal number of sampled transitions, which can exceed the unique dataset size because sampling is with replacement. \code{offline\_log\_interval} controls validation-loss logging, while \code{offline\_eval\_interval} optionally triggers an intermediate direct simulator evaluation. The direct evaluation is useful for monitoring but does not select the saved best checkpoint.
+
+At each validation point the trainer computes average loss on the complete validation transition split, retaining the algorithm-specific components. The best checkpoint is the smallest validation loss seen so far. Optional early stopping compares that same loss using \code{early\_stopping\_patience} and \code{early\_stopping\_min\_delta}. The final direct evaluation always loads the validation-selected best checkpoint. Thus the roles are: training split for gradient updates, validation split for model selection, simulator for direct policy evaluation, and OPE holdout for counterfactual diagnostics.
+
+Online configurations remain available as simulator baselines. DQN collects replay transitions; PPO collects rollout segments; world models collect replay transitions before CEM-guided behavior after \code{warmup\_steps}. They share adapter observations, masks, episode outcomes, and output artifact conventions with offline runs, but they are not trained from NPZ datasets.
+
+\section{Evaluation and Metrics}
+\label{sec:evaluation}
+
+\subsection{Direct simulator evaluation}
+
+For a loaded best policy, direct evaluation resets the configured simulator on fresh, reproducible seed offsets. It writes one row per episode in \code{episodes\_summary.csv} and one row per transition in \code{trajectories.csv}. Canonical episode fields are environment ID, return, success, episode length, action stability, abrupt-jump rate, and named adapter outcomes. Canonical trajectory fields include action index, action label, reward, done flag, success, named features, and adapter metrics. ICU retains \code{survived}, \code{sofa\_score}, \code{fluid\_bin}, and \code{vaso\_bin} aliases. EpiCare emits remission, adverse-event, symptom-burden, and time-to-remission fields.
+
+The following metrics are standardized structurally, but not necessarily semantically:
+\begin{itemize}
+    \item \textbf{Mean return}: mean undiscounted episode reward under the simulator reward definition.
+    \item \textbf{Mean success}: mean adapter-defined binary success. \code{mean\_survival} remains an alias for compatibility, even for EpiCare; new consumers should use \code{mean\_success}.
+    \item \textbf{Mean length}: number of actions before termination or truncation.
+    \item \textbf{Action stability}: mean adapter action distance over consecutive decisions. The abrupt-jump rate uses the adapter's own abruptness criterion.
+    \item \textbf{Named environment metrics}: ICU SOFA; EpiCare symptom burden, remission, adverse events, and time to remission. EpiCare evaluation additionally summarizes remission and adverse-event rates when those columns are present.
+\end{itemize}
+
+Training histories export the canonical \code{success\_rate} and the legacy \code{survival\_rate} alias. Environment metric traces are rectangularized with \code{initial\_}, \code{mean\_}, \code{final\_}, and \code{outcome\_} prefixes, with missing values represented as NaN. Offline histories separately export training/validation losses and any intermediate direct-evaluation values. A direct evaluation should not be compared numerically to OPE: the former calls the true benchmark simulator, while the latter is computed solely from logged trajectories.
+
+\subsection{Trajectory-wise OPE}
+\label{sec:ope}
+
+OPE is enabled only when an offline configuration supplies both \code{ope\_enabled=true} and \code{ope\_dataset\_path}. Given an episode $i$ of length $T_i$, define per-step ratios
+\begin{equation}
+ \rho_{i,t}=\frac{\policy(a_{i,t}\mid o_{i,t})}{\behavior(a_{i,t}\mid o_{i,t})},\qquad
+ W_{i,t}=\prod_{k=0}^{t}\rho_{i,k},\qquad W_i=W_{i,T_i-1},
+\end{equation}
+and logged discounted return $G_i=\sum_{t=0}^{T_i-1}\gamma^t r_{i,t}$. For $n$ held-out trajectories, the implementation reports
+\begin{align}
+ \widehat V_{\mathrm{IS}} &= \frac{1}{n}\sum_i W_iG_i,\\
+ \widehat V_{\mathrm{WIS}} &= \frac{\sum_i W_iG_i}{\sum_iW_i},\\
+ \widehat V_{\mathrm{PDIS}} &= \frac{1}{n}\sum_i\sum_t\gamma^tW_{i,t}r_{i,t},\\
+ \widehat V_{\mathrm{WPDIS}} &= \sum_t\gamma^t\frac{\sum_iW_{i,t}r_{i,t}}{\sum_iW_{i,t}},
+\end{align}
+with a zero contribution when a self-normalizing denominator is zero. Bootstrap resampling is at the trajectory level and writes \code{ope\_bootstrap.csv}; \code{ope\_summary.json} records point estimates, bootstrap means, 95\% percentile intervals, and configuration metadata.
+
+The OPE diagnostics are as important as the estimates: number of trajectories and transitions, target-action support rate, out-of-support action rate, mean target probability for logged actions, trajectory effective sample size (ESS), zero-weight trajectory rate, and maximum log trajectory weight. These estimators target discounted reward only. They do not counterfactually estimate remission, SOFA, adverse-event rate, symptom burden, or time to remission. A deterministic target policy frequently assigns zero probability to logged actions; if support is poor or ESS is near zero, a numeric estimate is a failure-mode diagnostic rather than evidence for policy ranking. Direct method, fitted Q evaluation, and doubly robust OPE are intentionally outside this implementation.
+
+\section{Reproducibility and Artifacts}
+\label{sec:artifacts}
+
+Each resolved configuration is hashed into an output directory. A completed run writes its resolved \code{config.json}, \code{environment\_spec.json}, best and last checkpoints when enabled, serialized training metrics, human-readable metric summaries, CSV histories, direct-evaluation tables, and optional OPE exports. The principal artifacts are:
+\begin{itemize}
+    \item \code{metrics\_summary.json/csv}: algorithm, mode, seed, train summary, extra-loss summaries, environment-metric summaries, and direct evaluation summary.
+    \item \code{training\_history.csv}: online episode-level returns, success, length, action-change values, and environment metric series.
+    \item \code{offline\_training\_history.csv} and \code{offline\_eval\_history.csv}: optimization/validation traces and intermediate simulator evaluations for offline runs.
+    \item \code{episodes\_summary.csv} and \code{trajectories.csv}: direct simulator outcomes and transition-level decisions.
+    \item \code{ope\_summary.json} and \code{ope\_bootstrap.csv}: only when OPE is configured.
+\end{itemize}
+
+The operational CLI \code{scripts/bench.py} exposes the lifecycle without moving legacy configuration files: \code{overview} describes the offline-first workflow; \code{list} groups dataset, offline, and online configurations; \code{dataset} performs collection and prints split summaries; \code{run} prints a resolved preflight and a post-run evidence report; \code{suite} previews a full set and requires \code{--execute} to launch it; \code{inspect-dataset} validates shapes, masks, behavior propensities, and array roles; \code{inspect-run} separates training, direct simulator, and OPE evidence. Historical scripts remain supported for existing automation.
+
+\section{Limitations and Non-Claims}
+\label{sec:limitations}
+
+First, shared field names do not imply a shared clinical scale. ICU SOFA and EpiCare symptom burden have different origins, ranges, and meanings. ICU simulated survival and EpiCare simulated remission should never be pooled into one unqualified success number. Second, EpiCare's hidden disease state is intentionally excluded from policy inputs, so a feed-forward symptom-only policy faces partial observability; recurrent history models are not currently implemented. Third, the raw, latent, and reconstructive models are learned one-step predictors with CEM planning, not uncertainty-calibrated causal models. Fourth, IS-family OPE is vulnerable to support mismatch and weight degeneracy, particularly for deterministic targets and multi-step treatment trajectories. Finally, no simulator benchmark, including these source environments, validates a policy for clinical use.
+
+\begin{thebibliography}{9}
+
+\bibitem{choudhary2024icu}
+Kartik Choudhary, Dhawal Gupta, and Philip S. Thomas.
+\newblock ICU-Sepsis: A Benchmark MDP Built from Real Medical Data.
+\newblock arXiv:2406.05646, 2024.
+
+\bibitem{hargrave2024epicare}
+Mason Hargrave, Alex Spaeth, and Logan Grosenick.
+\newblock EpiCare: A Reinforcement Learning Benchmark for Dynamic Treatment Regimes.
+\newblock NeurIPS Datasets and Benchmarks Track, 2024.
+
+\end{thebibliography}
+
+\end{document}
