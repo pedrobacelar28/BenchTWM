@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from tqdm.auto import tqdm
+from src.utils.progress import tqdm
 
 try:
     from torch.utils.tensorboard import SummaryWriter

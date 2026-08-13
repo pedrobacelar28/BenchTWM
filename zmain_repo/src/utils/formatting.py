@@ -39,13 +39,13 @@ def experiment_signature(experiment: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def create_file_name(experiment: dict, sub_folder: str = "results") -> tuple[str, str]:
+def create_file_name(experiment: dict, sub_folder: str = "adhoc") -> tuple[str, str]:
     algo = method_id(normalize_experiment(experiment))
-    folder = PROJECT_ROOT / sub_folder / algo
+    folder = PROJECT_ROOT / "artifacts" / sub_folder / algo
     return f"{folder}/", experiment_signature(experiment)
 
 
-def output_dir_for_experiment(experiment: dict, sub_folder: str = "results") -> Path:
+def output_dir_for_experiment(experiment: dict, sub_folder: str = "adhoc") -> Path:
     folder, signature = create_file_name(experiment, sub_folder=sub_folder)
     return Path(folder) / signature
 

@@ -49,16 +49,19 @@ Every NPZ file contains these arrays, aligned on its first axis `N`:
 ICU datasets also preserve `sofa_scores` and `next_sofa_scores` for backward
 compatibility. These are optional aliases, not generalized schema requirements.
 
-`observations` is one-hot tabular state for ICU `discrete_id` and the symptom
-vector for EpiCare. Algorithms select the exact view through `obs_backend`;
-world models, DQN, and PPO receive `float32` tensors and action masks.
+For v0 recipes, `state_vectors`/`next_state_vectors` are the default continuous
+agent inputs (`float32`). The `discrete_id` one-hot view remains an explicit
+compatibility/ablation backend. Algorithms select the exact view through
+`obs_backend`; every view is paired with the same action masks.
 
 ## How Models Consume the Data
 
 | Consumer | Inputs from the schema | Supervision or use |
 |---|---|---|
-| Offline DQN | Observation, action mask, action, reward, next observation, terminal | One-step masked TD target |
-| Logged offline PPO | DQN fields plus `behavior_logprobs` | Logged-action likelihood ratio and BC penalty |
+| BC | Observation, action mask, action | Masked action cross-entropy |
+| Offline DQN/FQI | Observation, action mask, action, reward, next observation, terminal | One-step masked TD target |
+| IQL | DQN fields plus next-state value | Expectile value and advantage-weighted behavior cloning |
+| CQL | DQN fields plus next-state Q | TD target plus admissible-action conservative regularization |
 | Raw world model | Observation, action, next observation, reward, terminal | Next observation, reward, continuation prediction |
 | Latent/reconstructive world model | Sequence windows over the same fields | Multi-step latent/decoded dynamics and rollout validation |
 | OPE | Ordered trajectory, logged action, reward, behavior log probability | Importance ratios against target policy probabilities |
@@ -90,8 +93,7 @@ gives the semantic order of `env_metrics`; consumers must not assume that a
 column position means SOFA or symptom burden.
 
 ```bash
-python scripts/bench.py inspect-dataset \
-  datasets/offline/epicare/dev/smart/1000/train.npz
+python scripts/bench.py inspect dataset epicare/smart/dev
 ```
 
 The loader rejects missing required arrays, empty datasets, unsupported

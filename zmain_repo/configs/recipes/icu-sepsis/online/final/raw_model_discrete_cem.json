@@ -1,0 +1,57 @@
+{
+  "action_embed_dim": [
+    32
+  ],
+  "algo": "raw_model",
+  "batch_size": [
+    512
+  ],
+  "cem_alpha": 0.15,
+  "cem_elites": 16,
+  "cem_horizon": 12,
+  "cem_iterations": 3,
+  "cem_samples": 128,
+  "continue_loss_weight": 1.0,
+  "control_mode": "mpc_cem",
+  "dynamics_loss_weight": [
+    1.0
+  ],
+  "env_id": "icu_sepsis",
+  "env_kwargs": {},
+  "environment_seed": 1,
+  "eval_episodes": 10000,
+  "eval_seed_base": 100000,
+  "gamma": 1.0,
+  "hidden_dim": [
+    256
+  ],
+  "learning_rate": [
+    0.0003
+  ],
+  "max_episodes": 100000,
+  "obs_backend": "discrete_id",
+  "replay_size": [
+    100000
+  ],
+  "reward_loss_weight": 1.0,
+  "robustness_eval_episodes": 25,
+  "robustness_sigmas": [
+    0.01,
+    0.05,
+    0.2,
+    0.5,
+    0.8
+  ],
+  "robustness_trials": 4,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "schema_version": 1,
+  "seed": [
+    0
+  ],
+  "success_threshold": 0.85,
+  "track": false,
+  "updates_per_step": 1,
+  "use_tensorboard": false,
+  "warmup_steps": 10000
+}

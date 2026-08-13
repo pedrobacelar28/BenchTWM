@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from src.bootstrap import PROJECT_ROOT
+from src.utils.io import load_json
 
 
 REQUIRED_ARRAYS = {
@@ -72,6 +73,8 @@ class OfflineTransitionDataset:
         if obs_backend not in {"discrete_id", "state_vector"}:
             raise ValueError(f"Unsupported obs_backend={obs_backend!r}")
         self.obs_backend = obs_backend
+        metadata_path = self.path.parent / "metadata.json"
+        self.metadata = load_json(metadata_path) if metadata_path.exists() else {}
         with np.load(self.path, allow_pickle=False) as payload:
             missing = sorted(REQUIRED_ARRAYS - set(payload.files))
             if missing:
@@ -106,6 +109,14 @@ class OfflineTransitionDataset:
     @property
     def obs_dim(self) -> int:
         return int(self._obs_array("obs").shape[1])
+
+    @property
+    def feature_names(self) -> tuple[str, ...]:
+        observation = self.metadata.get("observation", {})
+        names = observation.get("feature_names")
+        if names is None:
+            names = self.metadata.get("environment", {}).get("feature_names", [])
+        return tuple(str(name) for name in names)
 
     @property
     def num_actions(self) -> int:

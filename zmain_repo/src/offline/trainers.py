@@ -13,16 +13,20 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
-from tqdm.auto import tqdm
+from src.utils.progress import progress_write, tqdm
 
 from src.algorithms.cem_world_models import batch_loss as _cem_batch_loss
 from src.algorithms.cem_world_models import build_model as _build_cem_model
 from src.algorithms.cem_world_models import make_policy as _make_cem_policy
 from src.algorithms.cem_world_models import rollout_validation_metrics as _cem_rollout_validation_metrics
+from src.algorithms.bc import BCPolicy
+from src.algorithms.cql import CQLPolicy
 from src.algorithms.dqn import DQNPolicy
+from src.algorithms.iql import IQLPolicy
 from src.algorithms.ppo import PPOPolicy
 from src.evaluation import evaluate_policy
 from src.models.mlp import build_actor_critic, build_q_network
+from src.models.offline_rl import build_cql_agent, build_iql_agent
 from src.offline.dataset import OfflineTransitionDataset
 from src.utils.metrics import summarize_training
 from src.utils.methods import method_id
@@ -150,18 +154,18 @@ def _write_metrics(args, tag: str, progress: OfflineProgress | None, rows: dict[
         return
     if _console_style(args) == "verbose":
         suffix = "" if progress is None else f" @ step={progress.step}"
-        tqdm.write(f"{tag}{suffix}:")
+        progress_write(f"{tag}{suffix}:")
         for key, value in rows.items():
             if isinstance(value, float):
-                tqdm.write(f"  {key}: {value:.6f}")
+                progress_write(f"  {key}: {value:.6f}")
             else:
-                tqdm.write(f"  {key}: {value}")
+                progress_write(f"  {key}: {value}")
         return
     prefix = f"[{tag.lower()}]"
     if progress is not None:
         prefix = f"{prefix} step={progress.step:>6d} sampled={progress.sampled_transitions:>9d}"
     metrics = "  ".join(f"{_short_metric_name(key)}={_format_metric(value)}" for key, value in rows.items())
-    tqdm.write(f"{prefix}  {metrics}")
+    progress_write(f"{prefix}  {metrics}")
 
 
 def _set_train_postfix(progress: OfflineProgress, train_loss: float, extra: dict[str, float] | None = None) -> None:
@@ -236,6 +240,29 @@ def _update_early_stopping(
         state.early_stop_reason = "patience_exhausted"
         return False, True
     return False, False
+
+
+def _report_early_stopping(
+    args,
+    state: EarlyStoppingState,
+    *,
+    progress: OfflineProgress,
+    validation_loss: float,
+    improved: bool,
+    stop_due: bool,
+) -> None:
+    """Emit the criterion and patience state alongside each validation check."""
+
+    if not _show_progress(args) or not state.enabled:
+        return
+    decision = "new best" if improved else f"no improvement ({state.checks_without_improvement}/{state.patience})"
+    if stop_due:
+        decision = "EARLY STOP: patience exhausted"
+    progress_write(
+        "[early-stop] "
+        f"step={progress.step} monitor=validation_loss(min) current={validation_loss:.6f} "
+        f"best={state.best_loss:.6f} min_delta={state.min_delta:g} {decision}"
+    )
 
 
 def _finalize_early_stopping(state: EarlyStoppingState, *, progress: OfflineProgress | None, schedule: OfflineSchedule) -> dict[str, Any]:
@@ -432,15 +459,20 @@ def _training_batches(args, dataset: OfflineTransitionDataset, device: str | tor
         dynamic_ncols=True,
         disable=disable,
     )
-    for step in progress_bar:
-        batch = dataset.sample(_batch_size(args), device=device)
-        sampled_transitions = step * _batch_size(args)
-        is_last = step == schedule.total_steps
-        log_due = is_last or (_log_interval(args) > 0 and step % _log_interval(args) == 0)
-        eval_due = _eval_during_training(args) and (
-            is_last or (_eval_interval(args) > 0 and step % _eval_interval(args) == 0)
-        )
-        yield OfflineProgress(step, sampled_transitions, log_due, eval_due, progress_bar), batch, schedule
+    try:
+        for step in progress_bar:
+            batch = dataset.sample(_batch_size(args), device=device)
+            sampled_transitions = step * _batch_size(args)
+            is_last = step == schedule.total_steps
+            log_due = is_last or (_log_interval(args) > 0 and step % _log_interval(args) == 0)
+            eval_due = _eval_during_training(args) and (
+                is_last or (_eval_interval(args) > 0 and step % _eval_interval(args) == 0)
+            )
+            yield OfflineProgress(step, sampled_transitions, log_due, eval_due, progress_bar), batch, schedule
+    finally:
+        # Trainers may break early after a validation check. Close the shared
+        # Rich task so final evaluation and OPE can render their own progress.
+        progress_bar.close()
 
 
 def _validation_loss(
@@ -553,11 +585,19 @@ def train_dqn(config: dict, output_dir):
                 }
             )
             _set_train_postfix(progress, float(loss.item()), {"val_loss": val_loss})
-            _, stop_due = _update_early_stopping(
+            improved, stop_due = _update_early_stopping(
                 early_stopping,
                 validation_loss=float(val_loss),
                 progress=progress,
                 checkpoint={"model_state_dict": q_network.state_dict()},
+            )
+            _report_early_stopping(
+                args,
+                early_stopping,
+                progress=progress,
+                validation_loss=float(val_loss),
+                improved=improved,
+                stop_due=stop_due,
             )
         if progress.eval_due:
             stats = _eval_stats(DQNPolicy(q_network, temperature=float(getattr(args, "policy_temperature", 1.0))), config, progress, args)
@@ -660,11 +700,19 @@ def train_ppo(config: dict, output_dir):
                 }
             )
             _set_train_postfix(progress, float(loss.item()), {"val_loss": val_loss})
-            _, stop_due = _update_early_stopping(
+            improved, stop_due = _update_early_stopping(
                 early_stopping,
                 validation_loss=float(val_loss),
                 progress=progress,
                 checkpoint={"model_state_dict": agent.state_dict()},
+            )
+            _report_early_stopping(
+                args,
+                early_stopping,
+                progress=progress,
+                validation_loss=float(val_loss),
+                improved=improved,
+                stop_due=stop_due,
             )
         if progress.eval_due:
             stats = _eval_stats(PPOPolicy(agent), config, progress, args)
@@ -684,6 +732,204 @@ def train_ppo(config: dict, output_dir):
         training_metadata=training_metadata,
     )
     return _final_result(metrics, {"model_state_dict": agent.state_dict()}, early_stopping.best_checkpoint)
+
+
+def _bc_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
+    logprob, entropy, _ = agent.evaluate_actions(batch.obs, batch.action, batch.action_mask)
+    loss = -logprob.mean()
+    return loss, {"bc_loss": float(loss.item()), "entropy": float(entropy.mean().item())}
+
+
+def _iql_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
+    q1_values = agent.q1(batch.obs, batch.action_mask)
+    q2_values = agent.q2(batch.obs, batch.action_mask)
+    q1_action = q1_values.gather(1, batch.action.unsqueeze(1)).squeeze(1)
+    q2_action = q2_values.gather(1, batch.action.unsqueeze(1)).squeeze(1)
+    q_min_action = torch.minimum(q1_action, q2_action)
+
+    with torch.no_grad():
+        next_value = agent.value(batch.next_obs).view(-1)
+        td_target = batch.reward + float(args.gamma) * next_value * (1.0 - batch.done)
+    q_loss = F.mse_loss(q1_action, td_target) + F.mse_loss(q2_action, td_target)
+
+    value = agent.value(batch.obs).view(-1)
+    value_error = q_min_action.detach() - value
+    expectile = float(getattr(args, "iql_expectile_tau", getattr(args, "expectile_tau", 0.7)))
+    value_loss = torch.where(value_error < 0.0, expectile, 1.0 - expectile) * value_error.pow(2)
+    value_loss = value_loss.mean()
+
+    advantage = (q_min_action.detach() - value.detach())
+    beta = float(getattr(args, "iql_temperature_beta", getattr(args, "temperature_beta", 3.0)))
+    clip = float(getattr(args, "iql_advantage_clip", getattr(args, "advantage_clip", 100.0)))
+    weights = torch.exp(beta * advantage).clamp(max=clip)
+    logprob, entropy, _ = agent.actor.evaluate_actions(batch.obs, batch.action, batch.action_mask)
+    actor_loss = -(weights * logprob).mean()
+
+    loss = (
+        float(getattr(args, "iql_q_loss_weight", getattr(args, "q_loss_weight", 1.0))) * q_loss
+        + float(getattr(args, "iql_value_loss_weight", getattr(args, "value_loss_weight", 1.0))) * value_loss
+        + float(getattr(args, "iql_actor_loss_weight", getattr(args, "actor_loss_weight", 1.0))) * actor_loss
+    )
+    return loss, {
+        "q_loss": float(q_loss.item()),
+        "value_loss": float(value_loss.item()),
+        "actor_loss": float(actor_loss.item()),
+        "entropy": float(entropy.mean().item()),
+        "advantage_weight": float(weights.mean().item()),
+    }
+
+
+def _cql_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
+    q1_values = agent.q1(batch.obs, batch.action_mask)
+    q2_values = agent.q2(batch.obs, batch.action_mask)
+    q1_action = q1_values.gather(1, batch.action.unsqueeze(1)).squeeze(1)
+    q2_action = q2_values.gather(1, batch.action.unsqueeze(1)).squeeze(1)
+    with torch.no_grad():
+        next_q = torch.minimum(
+            agent.q1(batch.next_obs, batch.next_action_mask),
+            agent.q2(batch.next_obs, batch.next_action_mask),
+        ).max(dim=1).values
+        td_target = batch.reward + float(args.gamma) * next_q * (1.0 - batch.done)
+    td_loss = F.mse_loss(q1_action, td_target) + F.mse_loss(q2_action, td_target)
+    # The Q networks return -1e9 for inadmissible actions, so logsumexp is
+    # exactly over the admissible action set rather than a post-hoc penalty.
+    conservative = (
+        torch.logsumexp(q1_values, dim=1).mean() - q1_action.mean()
+        + torch.logsumexp(q2_values, dim=1).mean() - q2_action.mean()
+    ) * 0.5
+    alpha = float(getattr(args, "cql_alpha", 1.0))
+    loss = td_loss + alpha * conservative
+    return loss, {
+        "q_loss": float(td_loss.item()),
+        "cql_loss": float(conservative.item()),
+        "conservative_loss": float((alpha * conservative).item()),
+    }
+
+
+def _train_offline_policy(config: dict, output_dir, *, agent, loss_fn, make_policy, tag: str):
+    """Shared step-budget loop for BC/IQL/CQL.
+
+    These methods deliberately use the same validation/checkpoint contract as
+    the existing offline DQN trainer.  Simulator evaluation is controlled by
+    the recipe; the v0 recipes disable intermediate evaluation and the runner
+    performs the fixed final evaluation.
+    """
+    args = SimpleNamespace(**config)
+    set_seed(args.seed)
+    device = get_torch_device()
+    agent = agent.to(device)
+    train_dataset, val_dataset = _load_datasets(args, args.obs_backend)
+    optimizer = optim.Adam(agent.parameters(), lr=float(args.learning_rate))
+    train_history = []
+    eval_history = []
+    early_stopping = _make_early_stopping_state(args)
+    last_schedule = _schedule(args, train_dataset)
+    last_progress: OfflineProgress | None = None
+
+    for progress, batch, schedule in _training_batches(args, train_dataset, device, tag):
+        last_schedule = schedule
+        last_progress = progress
+        loss, info = loss_fn(agent, batch, args)
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(agent.parameters(), float(getattr(args, "max_grad_norm", 10.0)))
+        optimizer.step()
+        _set_train_postfix(progress, float(loss.item()), info)
+        stop_due = False
+        if progress.log_due:
+            val_loss, val_info = _validation_loss(
+                val_dataset,
+                args,
+                device,
+                lambda val_batch: loss_fn(agent, val_batch, args),
+                progress=progress,
+                train_loss=float(loss.item()),
+            )
+            train_history.append(
+                {
+                    "step": progress.step,
+                    "sampled_transitions": progress.sampled_transitions,
+                    "loss": float(loss.item()),
+                    "validation_loss": float(val_loss),
+                    **info,
+                    **{f"validation_{key}": value for key, value in val_info.items()},
+                }
+            )
+            _set_train_postfix(progress, float(loss.item()), {"val_loss": val_loss})
+            improved, stop_due = _update_early_stopping(
+                early_stopping,
+                validation_loss=float(val_loss),
+                progress=progress,
+                checkpoint={"model_state_dict": agent.state_dict()},
+            )
+            _report_early_stopping(
+                args,
+                early_stopping,
+                progress=progress,
+                validation_loss=float(val_loss),
+                improved=improved,
+                stop_due=stop_due,
+            )
+        if progress.eval_due:
+            stats = _eval_stats(make_policy(agent), config, progress, args)
+            eval_history.append(stats)
+            _set_train_postfix(progress, float(loss.item()), {"eval_return": stats["mean_return"]})
+        if stop_due:
+            break
+
+    training_metadata = _finalize_early_stopping(early_stopping, progress=last_progress, schedule=last_schedule)
+    metrics = _metrics_from_history(
+        train_history,
+        eval_history,
+        args,
+        config,
+        train_dataset,
+        val_dataset,
+        last_schedule,
+        training_metadata=training_metadata,
+    )
+    return _final_result(metrics, {"model_state_dict": agent.state_dict()}, early_stopping.best_checkpoint)
+
+
+def train_bc(config: dict, output_dir):
+    args = SimpleNamespace(**config)
+    # Dataset dimensions are read once before constructing the actor so both
+    # vector and retained discrete_id recipes use the same builder.
+    train_dataset, _ = _load_datasets(args, args.obs_backend)
+    agent = build_actor_critic(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    )
+    return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_bc_losses, make_policy=lambda a: BCPolicy(a), tag=method_id(config))
+
+
+def train_iql(config: dict, output_dir):
+    args = SimpleNamespace(**config)
+    train_dataset, _ = _load_datasets(args, args.obs_backend)
+    agent = build_iql_agent(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    )
+    return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_iql_losses, make_policy=lambda a: IQLPolicy(a), tag=method_id(config))
+
+
+def train_cql(config: dict, output_dir):
+    args = SimpleNamespace(**config)
+    train_dataset, _ = _load_datasets(args, args.obs_backend)
+    agent = build_cql_agent(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_states=train_dataset.num_states,
+        num_actions=train_dataset.num_actions,
+        obs_backend=args.obs_backend,
+    )
+    return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_cql_losses, make_policy=lambda a: CQLPolicy(a), tag=method_id(config))
 
 
 def _train_cem_model(config: dict, output_dir, *, model_family: str):
@@ -760,11 +1006,19 @@ def _train_cem_model(config: dict, output_dir, *, model_family: str):
                 }
             )
             _set_train_postfix(progress, float(loss.item()), {"val_loss": val_loss})
-            _, stop_due = _update_early_stopping(
+            improved, stop_due = _update_early_stopping(
                 early_stopping,
                 validation_loss=float(val_loss),
                 progress=progress,
                 checkpoint={"model_state_dict": model.state_dict()},
+            )
+            _report_early_stopping(
+                args,
+                early_stopping,
+                progress=progress,
+                validation_loss=float(val_loss),
+                improved=improved,
+                stop_due=stop_due,
             )
         if progress.eval_due:
             stats = _eval_stats(_make_cem_policy(model, config), config, progress, args)
@@ -804,6 +1058,9 @@ OFFLINE_TRAINERS = {
     "reconstructive_model": train_reconstructive_model,
     "dqn": train_dqn,
     "ppo": train_ppo,
+    "bc": train_bc,
+    "iql": train_iql,
+    "cql": train_cql,
 }
 
 

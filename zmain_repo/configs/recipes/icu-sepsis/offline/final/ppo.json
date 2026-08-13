@@ -1,0 +1,96 @@
+{
+  "algo": "ppo",
+  "clip_coef": [
+    0.5
+  ],
+  "clip_vloss": [
+    false
+  ],
+  "control_mode": "logged_ppo_bc",
+  "dataset_path": "artifacts/datasets/final/expert/100000/train.npz",
+  "early_stopping_min_delta": 0.0,
+  "early_stopping_patience": 20,
+  "ent_coef": [
+    0.005
+  ],
+  "env_id": "icu_sepsis",
+  "env_kwargs": {},
+  "environment_seed": 1,
+  "eval_episodes": 5000,
+  "eval_seed_base": 100000,
+  "gae_lambda": [
+    0.4
+  ],
+  "gamma": 1.0,
+  "learning_rate": [
+    0.005
+  ],
+  "max_grad_norm": [
+    0.4
+  ],
+  "norm_adv": true,
+  "num_minibatches": [
+    1
+  ],
+  "num_steps": [
+    500
+  ],
+  "obs_backend": "discrete_id",
+  "offline_batch_size": 512,
+  "offline_bc_weight": [
+    0.1
+  ],
+  "offline_eval_episodes": 500,
+  "offline_eval_interval": 40000,
+  "offline_log_interval": 1000,
+  "offline_train_steps": 500000,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "schema_version": 1,
+  "seed": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29
+  ],
+  "success_threshold": 0.85,
+  "target_kl": [
+    0.001
+  ],
+  "track": false,
+  "train_mode": "offline",
+  "update_epochs": [
+    6
+  ],
+  "use_tensorboard": false,
+  "val_dataset_path": "artifacts/datasets/final/expert/100000/val.npz",
+  "vf_coef": [
+    0.3
+  ]
+}

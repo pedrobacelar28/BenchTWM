@@ -1,9 +1,0 @@
-{
-  "algo": "latent_model", "train_mode": "offline", "env_id": "epicare", "environment_seed": 1,
-  "env_kwargs": {"patient_modifiers": true}, "seed": [0], "obs_backend": "state_vector", "control_mode": "offline_mpc_cem",
-  "dataset_path": "datasets/offline/epicare/final/smart/100000/train.npz", "val_dataset_path": "datasets/offline/epicare/final/smart/100000/val.npz", "ope_dataset_path": "datasets/offline/epicare/final/smart/100000/ope_test.npz",
-  "ope_enabled": true, "ope_bootstrap_replicates": 200, "offline_train_steps": 500000, "offline_batch_size": 256, "offline_log_interval": 1000, "offline_eval_interval": 20000, "offline_eval_episodes": 500,
-  "eval_episodes": 1000, "eval_seed_base": 100000, "save_checkpoints": true, "save_trajectories": true, "gamma": 1.0,
-  "learning_rate": [0.0003], "hidden_dim": [128], "latent_dim": [32], "action_embed_dim": [16], "target_encoder_decay": 0.99, "cem_horizon": 8, "cem_samples": 128, "cem_elites": 16, "cem_iterations": 4, "cem_alpha": 0.2,
-  "dynamics_loss_weight": [1.0], "reward_loss_weight": 5.0, "continue_loss_weight": 2.0, "success_threshold": 0.0, "track": false, "use_tensorboard": false, "early_stopping_patience": 20, "early_stopping_min_delta": 0.0
-}

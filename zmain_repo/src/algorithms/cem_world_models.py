@@ -66,6 +66,14 @@ def build_model(model_family: str, *, obs_dim: int, num_actions: int, obs_backen
 
 
 class CEMWorldModelPolicy:
+    ope_probability_contract = {
+        "status": "diagnostic",
+        "message": (
+            "CEM action probabilities depend on sampled planning sequences. "
+            "They are useful as a diagnostic, but do not represent an exact fixed stochastic deployment policy."
+        ),
+    }
+
     def __init__(self, model, planner: CategoricalCEMPlanner, gamma: float):
         self.model = model.eval()
         self.planner = planner

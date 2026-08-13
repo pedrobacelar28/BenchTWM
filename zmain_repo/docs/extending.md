@@ -1,39 +1,55 @@
-# Extending the Suite
+# Extending BenchTWM
 
-This checklist is the compatibility boundary for a third environment or a new algorithm. Keep existing adapters, NPZ files, configs, and output artifacts valid.
+The extension boundary is explicit: adapters define environments, algorithm
+registrations define learning, and `configs/catalog.json` defines what users
+can run. Do not add a command-specific code path for a new benchmark.
 
 ## Add an Environment
 
-1. Vendor only the runtime core under `third_party/<environment>/`, preserving its license and a `NOTICE` describing local changes.
-2. Add `src/envs/<environment>_adapter.py` implementing `EnvAdapter`.
-3. Create an `EnvSpec` with `env_id`, dimensions, supported observation backends, action labels, feature names, metric names, primary metric, and action geometry.
-4. Implement `reset`, `step`, `action_label`, `action_distance`, `transition_metrics`, and `episode_metrics`.
-5. Register a stable alias and construction path in `src/envs/factory.py`.
-6. Add a behavior-policy adapter in `src/offline/generate_dataset.py`. It must sample the action from a known distribution and write its exact `behavior_logprob`.
-7. Add reference-policy support in `src/envs/reference.py` when the source benchmark defines baselines.
-8. Add dataset, online, and offline dev configs. Use only observation backends genuinely exposed to the agent.
-9. Add tests for reset reproducibility, schema validity, split separation, finite behavior propensities, all algorithm smoke paths, and generic reports.
+1. Vendor only the runtime core under `third_party/<environment>/`, preserving
+   its upstream license and a local `NOTICE` describing modifications.
+2. Implement `src/envs/<environment>_adapter.py` as `EnvAdapter` and declare a
+   complete `EnvSpec`: observation backends, action labels/geometry, features,
+   named metrics, and primary metric.
+3. Register a stable `env_id` and constructor in `src/envs/factory.py`.
+4. Add behavior-policy collection support in `src/offline/generate_dataset.py`.
+   It must sample actions from a known distribution and record exact
+   `behavior_logprobs`.
+5. Add reference-policy support in `src/envs/reference.py` only when the
+   environment genuinely declares baseline policies.
+6. Add dataset recipes under `configs/datasets/<environment>/`, method recipes
+   under `configs/recipes/<environment>/`, and public IDs in `configs/catalog.json`.
+7. Run `python scripts/bench.py validate --smoke`, then add reset,
+   dataset-schema, propensity, offline/online, OPE, and report tests.
 
-The adapter must never place privileged latent state into the observation passed to an agent. A diagnostic ID may be exported only when clearly documented as privileged analysis data.
+An adapter must never expose privileged latent state as an agent observation.
+It may export diagnostic IDs only as explicitly documented analysis fields.
 
 ## Add an Algorithm
 
-1. Create `src/algorithms/<name>.py` with `train(config, output_dir)` and `load_policy(config, checkpoint)`.
-2. Return `metrics`, `checkpoint_last`, and `checkpoint_best` from training.
-3. Ensure the loaded policy implements `act(obs, info, deterministic=True)` and `action_probabilities(obs, info, deterministic=True)`.
-4. Respect `obs_backend` and `action_mask`; do not import an environment adapter directly from an algorithm.
-5. Register online training/loading in `src/algorithms/registry.py`.
-6. Add a fixed-data trainer to `src/offline/trainers.py` and its registry only if offline learning is supported.
-7. Emit meaningful optimization/validation metrics and keep checkpoints serializable with `torch.save`.
-8. Add dev configs for every supported environment/backend combination.
-9. Add unit tests for masking and probabilities, smoke tests for online/offline modes, and OPE integration when supported.
+1. Implement `train(config, output_dir)` and `load_policy(config, checkpoint)`
+   under `src/algorithms/`.
+2. Return `metrics`, `checkpoint_last`, and `checkpoint_best`. Checkpoints must
+   remain serializable with `torch.save`.
+3. The loaded policy must implement `act(obs, info, deterministic=True)` and
+   `action_probabilities(obs, info, deterministic=True)`.
+4. Respect `obs_backend` and `action_mask`; algorithms may not import a concrete
+   environment adapter.
+5. Register online training/loading in `src/algorithms/registry.py`. Register a
+   fixed-data trainer in `src/offline/trainers.py` when offline learning is
+   supported.
+6. Add a method recipe for each compatible environment/backend/tier and a
+   catalog method ID. Keep CEM geometry variants separate public methods.
+7. Add a dev smoke test and include OPE coverage whenever the method provides
+   action probabilities.
 
-## Config Requirements
+## Recipe Contract
 
-All experiment configs should state the following explicitly for new work:
+Every canonical recipe states the generic environment contract explicitly:
 
 ```json
 {
+  "schema_version": 1,
   "env_id": "epicare",
   "environment_seed": 1,
   "env_kwargs": {},
@@ -43,16 +59,12 @@ All experiment configs should state the following explicitly for new work:
 }
 ```
 
-Omit `env_id` only when intentionally using legacy ICU-Sepsis defaults. Offline configs additionally need `dataset_path`, `val_dataset_path`, gradient-step budget, and validation/evaluation intervals. OPE needs a held-out `ope_dataset_path` and `ope_enabled: true`.
-
-## Required Regression Checks
+The catalog supplies dataset paths, the chosen scalar seed, run identity, and
+artifact location at runtime. Do not embed output paths in recipes. Validate a
+new catalog entry before execution:
 
 ```bash
-PYTHONPATH=. python -m unittest discover -s tests -v
-python scripts/bench.py list
-python scripts/bench.py suite --env <environment> --mode offline --tier dev
-python scripts/bench.py dataset --config <dataset-config>
-python scripts/bench.py run --config <offline-config>
+python scripts/bench.py validate
+python scripts/bench.py dataset show <dataset-id>
+python scripts/bench.py train <dataset-id> <method-id> --dry-run
 ```
-
-For a new environment, inspect `environment_spec.json`, `episodes_summary.csv`, `trajectories.csv`, and `ope_summary.json` rather than relying only on successful process exit.

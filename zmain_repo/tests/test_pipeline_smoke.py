@@ -131,7 +131,7 @@ class TestPipelineSmoke(unittest.TestCase):
             config = tiny_config("dqn")
             config["save_trajectories"] = True
             config["eval_episodes"] = 2
-            run_dir = run_experiment(config, force_run=True)
+            run_dir = run_experiment(config, force_run=True, output_dir=Path(tmpdir) / "run", quiet=True)
             self.assertTrue((run_dir / "metrics.pkl").exists())
             self.assertTrue((run_dir / "metrics_summary.json").exists())
             self.assertTrue((run_dir / "metrics_summary.csv").exists())

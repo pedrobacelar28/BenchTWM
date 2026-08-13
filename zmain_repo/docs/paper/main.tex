@@ -369,7 +369,7 @@ Each resolved configuration is hashed into an output directory. A completed run 
     \item \code{ope\_summary.json} and \code{ope\_bootstrap.csv}: only when OPE is configured.
 \end{itemize}
 
-The operational CLI \code{scripts/bench.py} exposes the lifecycle without moving legacy configuration files: \code{overview} describes the offline-first workflow; \code{list} groups dataset, offline, and online configurations; \code{dataset} performs collection and prints split summaries; \code{run} prints a resolved preflight and a post-run evidence report; \code{suite} previews a full set and requires \code{--execute} to launch it; \code{inspect-dataset} validates shapes, masks, behavior propensities, and array roles; \code{inspect-run} separates training, direct simulator, and OPE evidence. Historical scripts remain supported for existing automation.
+The operational CLI \code{scripts/bench.py} exposes a single offline-first lifecycle backed by versioned recipes: \code{doctor} verifies local capabilities; \code{catalog} lists curated datasets and compatible methods; \code{dataset build} performs collection; \code{train} resolves one recipe and records provenance; \code{suite} previews a set and requires \code{--execute} to launch a local queue; \code{inspect} separates optimization, direct simulator, and OPE evidence. Generated artifacts are stored under a clean \code{artifacts/} root and retain their resolved configuration and runtime manifest.
 
 \section{Limitations and Non-Claims}
 \label{sec:limitations}

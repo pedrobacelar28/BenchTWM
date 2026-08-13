@@ -1,0 +1,14 @@
+{
+  "behavior_policy": "epsilon_expert",
+  "dataset_name": "icu_sepsis_epsilon_expert_final",
+  "env_id": "icu_sepsis",
+  "env_kwargs": {},
+  "environment_seed": 1,
+  "epsilon": 0.2,
+  "gamma": 1.0,
+  "num_train_episodes": 50000,
+  "num_val_episodes": 5000,
+  "overwrite": false,
+  "schema_version": 1,
+  "seed": 0
+}

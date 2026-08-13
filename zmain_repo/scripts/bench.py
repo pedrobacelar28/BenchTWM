@@ -1,810 +1,59 @@
-"""Unified, offline-first command line interface for the benchmark suite.
+"""BenchTWM operational CLI.
 
-The historical scripts remain supported. This command discovers their existing
-JSON configurations and makes the normal lifecycle explicit:
+The public workflow is offline-first:
 
-    logged data -> offline fit -> simulator evaluation -> optional OPE
+    doctor -> catalog -> dataset build -> train -> status -> report / ope
 
-Examples:
-    python scripts/bench.py overview
-    python scripts/bench.py list --env epicare --kind offline --tier dev
-    python scripts/bench.py dataset --config experiments/datasets/dev/epicare_smart.json
-    python scripts/bench.py run --config experiments/offline/dev/epicare_dqn.json
-    python scripts/bench.py suite --env epicare --mode offline --tier dev
-    python scripts/bench.py inspect-dataset datasets/offline/epicare/dev/smart/1000/train.npz
+All experiment recipes are resolved from ``configs/catalog.json``. Generated
+data and run artifacts are written exclusively under ``artifacts/``.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import csv
+import importlib
 import json
 import os
 import sys
-from collections import Counter
-from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterator
 
 import numpy as np
+import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.envs.factory import environment_id, make_env
+from src.algorithms.registry import get_policy_loader
+from src.envs.factory import make_env
 from src.envs.reference import make_reference_policy
 from src.evaluation import evaluate_policy
-from src.offline.dataset import REQUIRED_ARRAYS
 from src.offline.generate_dataset import generate_dataset
+from src.offline.ope import evaluate_ope, export_ope
+from src.operations.artifacts import (
+    artifact_root,
+    discover_runs,
+    initial_manifest,
+    is_complete,
+    load_manifest,
+    resolve_run,
+    run_directory,
+)
+from src.operations.benchmark import summarize_pilot
+from src.operations.catalog import Catalog, CatalogError, dataset_artifact_paths, parse_overrides
+from src.operations.console import BenchConsole
+from src.operations.queue import QueueJob, execute_queue
+from src.operations.reporting import build_run_report
 from src.run_experiment import run_experiment
-from src.utils.formatting import output_dir_for_experiment
-from src.utils.io import load_json, save_json
-from src.utils.json_handling import get_param_iterable
-from src.utils.methods import method_id, train_mode
+from src.utils.io import ensure_dir, load_json, save_json
 
 
-WORKFLOW_ORDER = ("datasets", "offline", "online")
-WORKFLOW_LABELS = {
-    "datasets": "1. Logged datasets",
-    "offline": "2. Offline training (primary workflow)",
-    "online": "3. Online training (simulator baseline)",
-}
-ENVIRONMENT_LABELS = {
-    "icu_sepsis": "ICU-Sepsis",
-    "epicare": "EpiCare",
-}
-ARRAY_ROLES = {
-    "observations": "canonical observation",
-    "next_observations": "canonical next observation",
-    "state_vectors": "continuous agent input",
-    "next_state_vectors": "continuous next input",
-    "actions": "logged action index",
-    "next_actions": "next logged action index",
-    "rewards": "logged immediate reward",
-    "terminals": "terminal transition flag",
-    "state_ids": "diagnostic state id",
-    "next_state_ids": "diagnostic next state id",
-    "action_masks": "admissible actions at t",
-    "next_action_masks": "admissible actions at t+1",
-    "behavior_logprobs": "log mu(a_t | o_t)",
-    "behavior_policy_ids": "behavior-policy provenance",
-    "episode_ids": "trajectory grouping key",
-    "timesteps": "within-trajectory index",
-    "env_metrics": "adapter metrics at t",
-    "next_env_metrics": "adapter metrics at t+1",
-    "sofa_scores": "legacy ICU SOFA alias",
-    "next_sofa_scores": "legacy ICU next SOFA alias",
-}
-
-
-@dataclass(frozen=True)
-class ConfigEntry:
-    path: Path
-    relative_path: Path
-    kind: str
-    tier: str
-    env_id: str
-    algorithm: str
-    run_mode: str
-    num_variants: int
-
-    @property
-    def name(self) -> str:
-        return self.path.stem
-
-
-class Console:
-    """Small dependency-free terminal renderer with safe non-TTY output."""
-
-    def __init__(self, color: str = "auto"):
-        requested = str(color).lower()
-        self.color = requested == "always" or (
-            requested == "auto" and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-        )
-        self.width = 92
-
-    def _paint(self, value: str, code: str) -> str:
-        return f"\033[{code}m{value}\033[0m" if self.color else value
-
-    def heading(self, title: str, subtitle: str | None = None) -> None:
-        print("=" * self.width)
-        print(self._paint(title, "1;36"))
-        if subtitle:
-            print(subtitle)
-        print("=" * self.width)
-
-    def section(self, title: str) -> None:
-        print(f"\n{self._paint(title.upper(), '1;34')}")
-        print("-" * self.width)
-
-    def note(self, value: str) -> None:
-        print(self._paint(f"  {value}", "2"))
-
-    def status(self, label: str, value: str) -> None:
-        print(f"{self._paint(label, '1;32')}: {value}")
-
-    def key_values(self, rows: Iterable[tuple[str, Any]]) -> None:
-        materialized = [(str(key), _format_value(value)) for key, value in rows]
-        if not materialized:
-            return
-        width = min(30, max(len(key) for key, _ in materialized))
-        for key, value in materialized:
-            print(f"  {self._paint(key.ljust(width), '1')}  {value}")
-
-    def table(self, headers: Iterable[str], rows: Iterable[Iterable[Any]], *, max_widths: Iterable[int] | None = None) -> None:
-        header_values = [str(value) for value in headers]
-        row_values = [[str(value) for value in row] for row in rows]
-        if not row_values:
-            self.note("No entries.")
-            return
-        widths = [len(value) for value in header_values]
-        for row in row_values:
-            widths = [max(width, len(value)) for width, value in zip(widths, row)]
-        if max_widths is not None:
-            widths = [min(width, maximum) for width, maximum in zip(widths, max_widths)]
-        clipped_rows = [[_truncate(value, widths[index]) for index, value in enumerate(row)] for row in row_values]
-        clipped_headers = [_truncate(value, widths[index]) for index, value in enumerate(header_values)]
-        line = "-+-".join("-" * width for width in widths)
-        print(" | ".join(self._paint(value.ljust(widths[index]), "1") for index, value in enumerate(clipped_headers)))
-        print(line)
-        for row in clipped_rows:
-            print(" | ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
-
-
-def _truncate(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return value[:width]
-    return f"{value[: width - 3]}..."
-
-
-def _format_value(value: Any) -> str:
-    if isinstance(value, Path):
-        return _display_path(value)
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if isinstance(value, float):
-        if not np.isfinite(value):
-            return "n/a"
-        return f"{value:.6g}"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_format_value(item) for item in value)
-    if isinstance(value, dict):
-        return json.dumps(value, sort_keys=True)
-    return str(value)
-
-
-def _display_path(path: Path | str) -> str:
-    value = Path(path)
-    try:
-        return str(value.resolve().relative_to(PROJECT_ROOT))
-    except (ValueError, OSError):
-        return str(value)
-
-
-def _resolved_path(raw_path: str | Path) -> Path:
-    path = Path(raw_path)
-    return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
-
-
-def _load_config(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def discover_configs(root: Path = PROJECT_ROOT / "experiments") -> list[ConfigEntry]:
-    """Return current JSON files as a typed catalog without moving them."""
-
-    entries: list[ConfigEntry] = []
-    for path in sorted(root.rglob("*.json")):
-        relative = path.relative_to(root)
-        if len(relative.parts) < 2:
-            continue
-        raw = _load_config(path)
-        kind = relative.parts[0]
-        tier = relative.parts[1]
-        mode = "dataset" if kind == "datasets" else train_mode(raw)
-        entries.append(
-            ConfigEntry(
-                path=path,
-                relative_path=relative,
-                kind=kind,
-                tier=tier,
-                env_id=environment_id(raw),
-                algorithm=str(raw.get("algo", raw.get("behavior_policy", "dataset"))),
-                run_mode=mode,
-                num_variants=len(get_param_iterable(raw)),
-            )
-        )
-    return entries
-
-
-def _filter_entries(
-    entries: Iterable[ConfigEntry],
-    *,
-    env_id: str | None = None,
-    kind: str | None = None,
-    tier: str | None = None,
-    algorithm: str | None = None,
-    name: str | None = None,
-) -> list[ConfigEntry]:
-    selected = list(entries)
-    if env_id is not None:
-        selected = [entry for entry in selected if entry.env_id == env_id]
-    if kind is not None:
-        selected = [entry for entry in selected if entry.kind == kind]
-    if tier is not None:
-        selected = [entry for entry in selected if entry.tier == tier]
-    if algorithm is not None:
-        selected = [entry for entry in selected if entry.algorithm == algorithm]
-    if name is not None:
-        selected = [
-            entry
-            for entry in selected
-            if entry.name == name or str(entry.relative_path.with_suffix("")) == name
-        ]
-    return selected
-
-
-def _resolve_config(args: argparse.Namespace, *, kind: str | None = None) -> ConfigEntry:
-    raw_path = getattr(args, "config", None)
-    if raw_path:
-        path = _resolved_path(raw_path)
-        if not path.exists():
-            raise FileNotFoundError(path)
-        entries = [entry for entry in discover_configs() if entry.path.resolve() == path]
-        if entries:
-            return entries[0]
-        raw = _load_config(path)
-        return ConfigEntry(
-            path=path,
-            relative_path=path,
-            kind=kind or "external",
-            tier="external",
-            env_id=environment_id(raw),
-            algorithm=str(raw.get("algo", raw.get("behavior_policy", "dataset"))),
-            run_mode="dataset" if kind == "datasets" else train_mode(raw),
-            num_variants=len(get_param_iterable(raw)),
-        )
-
-    entries = _filter_entries(
-        discover_configs(),
-        env_id=getattr(args, "env_id", None),
-        kind=kind,
-        tier=getattr(args, "tier", None),
-        algorithm=getattr(args, "algorithm", None),
-        name=getattr(args, "name", None),
-    )
-    if len(entries) == 1:
-        return entries[0]
-    if not entries:
-        raise ValueError("No configuration matched. Use `bench.py list` to inspect available entries.")
-    options = "\n".join(f"  - {entry.relative_path}" for entry in entries)
-    raise ValueError(f"Configuration selection is ambiguous. Use --config or --name:\n{options}")
-
-
-def _resolved_variants(entry: ConfigEntry) -> list[dict]:
-    return [dict(variant) for variant in get_param_iterable(_load_config(entry.path))]
-
-
-def _environment_details(config: dict) -> dict[str, Any]:
-    """Read the adapter contract for human-facing preflight output."""
-
-    obs_backend = config.get("obs_backend")
-    env = make_env(config, obs_backend=obs_backend, seed=int(config.get("seed", 0)))
-    try:
-        spec = env.spec.to_dict()
-    finally:
-        env.close()
-    return spec
-
-
-def _print_workflow_hint(console: Console) -> None:
-    console.section("Offline-first workflow")
-    console.key_values(
-        [
-            ("1. Build logged data", "bench.py dataset --config experiments/datasets/<tier>/<dataset>.json"),
-            ("2. Inspect schema", "bench.py inspect-dataset <dataset>/train.npz"),
-            ("3. Preview runs", "bench.py suite --env <env> --mode offline --tier <tier>"),
-            ("4. Train", "bench.py run --config experiments/offline/<tier>/<algorithm>.json"),
-            ("5. Inspect evidence", "bench.py inspect-run <results-directory>"),
-        ]
-    )
-    console.note("Offline optimization consumes train.npz and val.npz. Direct evaluation uses the simulator; OPE uses ope_test.npz only.")
-
-
-def _print_catalog(entries: list[ConfigEntry], console: Console) -> None:
-    console.heading("BenchTWM configuration catalog", "Discovered experiment configurations; offline entries are shown first.")
-    if not entries:
-        console.note("No configurations matched.")
-        return
-    variants = sum(entry.num_variants for entry in entries)
-    by_environment = Counter(entry.env_id for entry in entries)
-    console.key_values(
-        [
-            ("Configurations", len(entries)),
-            ("Resolved variants", variants),
-            ("Environments", ", ".join(f"{ENVIRONMENT_LABELS.get(key, key)} ({value})" for key, value in sorted(by_environment.items()))),
-        ]
-    )
-    for kind in WORKFLOW_ORDER:
-        subset = [entry for entry in entries if entry.kind == kind]
-        if not subset:
-            continue
-        console.section(f"{WORKFLOW_LABELS[kind]} | {len(subset)} configurations")
-        rows = [
-            (
-                ENVIRONMENT_LABELS.get(entry.env_id, entry.env_id),
-                entry.tier,
-                entry.algorithm,
-                entry.num_variants,
-                entry.relative_path,
-            )
-            for entry in subset
-        ]
-        console.table(
-            ("environment", "tier", "algorithm / behavior", "variants", "configuration"),
-            rows,
-            max_widths=(16, 8, 26, 8, 46),
-        )
-
-
-def _print_dataset_plan(console: Console, entry: ConfigEntry, config: dict) -> None:
-    spec = _environment_details(config)
-    output_dir = _resolved_path(config.get("output_dir", "datasets/offline"))
-    console.heading("Dataset build", "A logged dataset is the input to every offline algorithm.")
-    console.section("Collection plan")
-    console.key_values(
-        [
-            ("Configuration", entry.relative_path),
-            ("Dataset", config.get("dataset_name", output_dir.name)),
-            ("Environment", ENVIRONMENT_LABELS.get(spec["env_id"], spec["env_id"])),
-            ("Environment seed", config.get("environment_seed", "legacy/default")),
-            ("Observation backend", spec["obs_backend"]),
-            ("Agent input", f"{spec['obs_dim']} values"),
-            ("Action space", f"{spec['num_actions']} actions; {spec['action_geometry']['type']} geometry"),
-            ("Behavior policy", config.get("behavior_policy", "unspecified")),
-            ("Train / validation episodes", f"{config.get('num_train_episodes', 0)} / {config.get('num_val_episodes', 0)}"),
-            ("OPE holdout", f"{config.get('num_ope_episodes', 0)} episodes" if config.get("ope_enabled") else "disabled"),
-            ("Output", output_dir),
-        ]
-    )
-    console.note("The generator records behavior_logprobs for each transition. Do not reuse validation data as an OPE holdout.")
-
-
-def _print_dataset_metadata(console: Console, metadata: dict) -> None:
-    environment = metadata["environment"]
-    console.section("Created dataset")
-    console.key_values(
-        [
-            ("Schema version", metadata.get("schema_version", "unknown")),
-            ("Environment", ENVIRONMENT_LABELS.get(environment["env_id"], environment["env_id"])),
-            ("Observation backend", environment["obs_backend"]),
-            ("Features", ", ".join(environment.get("feature_names", []))),
-            ("Metrics", ", ".join(environment.get("metric_names", []))),
-        ]
-    )
-    rows = []
-    for name, label in (("train", "train.npz"), ("validation", "val.npz"), ("ope_test", "ope_test.npz")):
-        split = metadata.get(name)
-        if not split:
-            continue
-        rows.append(
-            (
-                label,
-                split.get("num_transitions", 0),
-                split.get("num_episodes", 0),
-                split.get("mean_episode_length", 0.0),
-                split.get("return_mean", 0.0),
-                split.get("success_rate", 0.0),
-                _display_path(split.get("path", "")),
-            )
-        )
-    console.table(
-        ("split", "transitions", "episodes", "mean length", "mean return", "success", "path"),
-        rows,
-        max_widths=(12, 14, 10, 13, 13, 10, 35),
-    )
-    console.note("Next: inspect the train split, then preview an offline suite with `bench.py suite ... --mode offline`.")
-
-
-def _print_algorithm_plan(
-    console: Console,
-    entry: ConfigEntry,
-    params: dict,
-    output_dir: Path,
-    *,
-    offline_checks: dict[str, str] | None = None,
-) -> None:
-    spec = _environment_details(params)
-    offline = train_mode(params) == "offline"
-    console.heading(
-        "Offline training plan" if offline else "Online training plan",
-        "The resolved configuration is shown before any training state is changed.",
-    )
-    console.section("Identity")
-    console.key_values(
-        [
-            ("Configuration", entry.relative_path),
-            ("Environment", ENVIRONMENT_LABELS.get(spec["env_id"], spec["env_id"])),
-            ("Algorithm", method_id(params)),
-            ("Mode", train_mode(params)),
-            ("Seed", params.get("seed", 0)),
-            ("Observation backend", spec["obs_backend"]),
-            ("Model input", f"{spec['obs_dim']} values"),
-            ("Actions", f"{spec['num_actions']} ({spec['action_geometry']['type']})"),
-            ("Output", output_dir),
-        ]
-    )
-    if offline:
-        console.section("Offline evidence")
-        steps = int(params.get("offline_train_steps", 0))
-        batch_size = int(params.get("offline_batch_size", 0))
-        console.key_values(
-            [
-                ("Training split", _resolved_path(params["dataset_path"])),
-                ("Validation split", _resolved_path(params["val_dataset_path"])),
-                ("Dataset preflight", "; ".join(offline_checks.values()) if offline_checks else "not run (suite preview)"),
-                ("Optimization budget", f"{steps} gradient steps x batch {batch_size} = {steps * batch_size} sampled transitions"),
-                ("Train log interval", f"every {params.get('offline_log_interval', 0)} steps"),
-                ("Direct evaluation", f"every {params.get('offline_eval_interval', 0)} steps on {params.get('offline_eval_episodes', 0)} simulator episodes"),
-                ("Best checkpoint", "lowest validation loss"),
-                ("Final direct evaluation", f"{params.get('eval_episodes', 0)} fresh simulator episodes"),
-                ("OPE", _ope_plan_text(params)),
-            ]
-        )
-        console.note("Validation loss selects the checkpoint. OPE is a post-training diagnostic and never selects a model.")
-    else:
-        console.section("Online budget")
-        console.key_values(
-            [
-                ("Episodes", params.get("max_episodes", 0)),
-                ("Final direct evaluation", f"{params.get('eval_episodes', 0)} fresh simulator episodes"),
-                ("OPE", "not run for online configs unless an OPE dataset is explicitly configured"),
-            ]
-        )
-
-
-def _ope_plan_text(params: dict) -> str:
-    if not params.get("ope_enabled") or not params.get("ope_dataset_path"):
-        return "disabled"
-    return f"enabled on {_display_path(_resolved_path(params['ope_dataset_path']))}; {params.get('ope_bootstrap_replicates', 200)} bootstrap replicates"
-
-
-def _validate_offline_inputs(params: dict) -> dict[str, str]:
-    """Check immutable offline inputs before allocating a trainer or optimizer."""
-
-    checks: dict[str, str] = {}
-    configured: tuple[tuple[str, str], ...] = (("train", "dataset_path"), ("validation", "val_dataset_path"))
-    if params.get("ope_enabled"):
-        if not params.get("ope_dataset_path"):
-            raise ValueError("ope_enabled requires ope_dataset_path")
-        configured += (("OPE", "ope_dataset_path"),)
-    expected_env = environment_id(params)
-    expected_backend = str(params["obs_backend"])
-    resolved = [(label, _resolved_path(params[key])) for label, key in configured]
-    if len({path for _, path in resolved}) != len(resolved):
-        raise ValueError("train, validation, and OPE dataset paths must be distinct")
-    for label, path in resolved:
-        if not path.exists():
-            raise FileNotFoundError(f"{label} dataset does not exist: {path}")
-        with np.load(path, allow_pickle=False) as payload:
-            missing = sorted(REQUIRED_ARRAYS - set(payload.files))
-            if missing:
-                raise ValueError(f"{label} dataset is missing required arrays: {missing}")
-            if expected_backend == "state_vector" and not {"state_vectors", "next_state_vectors"}.issubset(payload.files):
-                raise ValueError(f"{label} dataset does not contain continuous state vectors required by obs_backend=state_vector")
-        metadata_path = path.parent / "metadata.json"
-        if metadata_path.exists():
-            metadata = load_json(metadata_path)
-            environment = metadata.get("environment", {})
-            recorded_env = environment.get("env_id")
-            recorded_backend = environment.get("obs_backend")
-            if recorded_env and recorded_env != expected_env:
-                raise ValueError(f"{label} dataset environment={recorded_env!r} does not match config environment={expected_env!r}")
-            if recorded_backend and recorded_backend != expected_backend:
-                raise ValueError(f"{label} dataset obs_backend={recorded_backend!r} does not match config obs_backend={expected_backend!r}")
-            checks[label] = f"{label}: ready ({_display_path(path)})"
-        else:
-            checks[label] = f"{label}: schema ready; metadata.json absent"
-    return checks
-
-
-def _numeric_stats(values: np.ndarray) -> str:
-    if values.size == 0:
-        return "empty"
-    numeric = np.asarray(values, dtype=np.float64)
-    finite = numeric[np.isfinite(numeric)]
-    if finite.size == 0:
-        return "no finite values"
-    return f"mean={finite.mean():.4g}; min={finite.min():.4g}; max={finite.max():.4g}"
-
-
-def _dataset_profile(path: Path, metadata: dict | None) -> dict[str, Any]:
-    """Build a compact, data-derived profile without changing the NPZ schema."""
-
-    with np.load(path, allow_pickle=False) as payload:
-        arrays = {name: payload[name] for name in payload.files}
-    actions = np.asarray(arrays["actions"], dtype=np.int64)
-    episode_ids = np.asarray(arrays["episode_ids"], dtype=np.int64)
-    masks = np.asarray(arrays["action_masks"], dtype=np.float32)
-    logprobs = np.asarray(arrays["behavior_logprobs"], dtype=np.float64)
-    behavior_ids = np.asarray(arrays["behavior_policy_ids"], dtype=np.int64)
-    policy_names = {}
-    if metadata:
-        policy_names = {int(value): key for key, value in metadata.get("policy_ids", {}).items()}
-    behavior_counts = Counter(policy_names.get(int(key), str(int(key))) for key in behavior_ids)
-    array_rows = [
-        (name, "x".join(str(dim) for dim in array.shape) or "scalar", str(array.dtype), ARRAY_ROLES.get(name, "environment extension"))
-        for name, array in sorted(arrays.items())
-    ]
-    primary_input = "state_vectors" if metadata and metadata.get("environment", {}).get("obs_backend") == "state_vector" else "observations"
-    metric_names = metadata.get("environment", {}).get("metric_names", []) if metadata else []
-    metrics_shape = arrays.get("env_metrics", np.empty((0, 0))).shape
-    metric_shape_text = ", ".join(metric_names) if metric_names else "not declared"
-    return {
-        "num_transitions": int(actions.size),
-        "num_episodes": int(np.unique(episode_ids).size),
-        "mean_episode_length": float(actions.size / max(1, np.unique(episode_ids).size)),
-        "primary_input": primary_input,
-        "input_shape": tuple(arrays[primary_input].shape),
-        "canonical_obs_shape": tuple(arrays["observations"].shape),
-        "num_actions": int(masks.shape[1]),
-        "actions_observed": int(np.unique(actions).size),
-        "mean_admissible_actions": float(masks.sum(axis=1).mean()),
-        "all_rows_have_action": bool(np.all(masks[np.arange(actions.size), actions] > 0.0)),
-        "reward_stats": _numeric_stats(np.asarray(arrays["rewards"])),
-        "terminal_rate": float(np.asarray(arrays["terminals"], dtype=np.float64).mean()),
-        "finite_behavior_logprobs": bool(np.isfinite(logprobs).all()),
-        "behavior_logprob_stats": _numeric_stats(logprobs),
-        "behavior_counts": behavior_counts,
-        "metric_shape": metrics_shape,
-        "metric_names": metric_shape_text,
-        "array_rows": array_rows,
-    }
-
-
-def _print_dataset_inspection(console: Console, path: Path, metadata: dict | None, profile: dict[str, Any]) -> None:
-    environment = (metadata or {}).get("environment", {})
-    config = (metadata or {}).get("config", {})
-    console.heading("Dataset inspection", "Schema, provenance, and OPE-readiness of one immutable logged split.")
-    console.section("Identity")
-    console.key_values(
-        [
-            ("File", path),
-            ("Dataset name", config.get("dataset_name", path.parent.name)),
-            ("Schema version", (metadata or {}).get("schema_version", "metadata not found")),
-            ("Environment", ENVIRONMENT_LABELS.get(environment.get("env_id", "unknown"), environment.get("env_id", "unknown"))),
-            ("Observation backend", environment.get("obs_backend", "unknown")),
-            ("Behavior policy", config.get("behavior_policy", "recorded per transition")),
-        ]
-    )
-    console.section("Offline model interface")
-    console.key_values(
-        [
-            ("Agent input", f"{profile['primary_input']} with shape {profile['input_shape']}"),
-            ("Canonical observation", f"observations with shape {profile['canonical_obs_shape']}"),
-            ("Action vector", f"integer action index in [0, {profile['num_actions'] - 1}]"),
-            ("Action coverage", f"{profile['actions_observed']} / {profile['num_actions']} actions observed"),
-            ("Action-mask check", "all logged actions admissible" if profile["all_rows_have_action"] else "FAILED: logged inadmissible action found"),
-            ("Metrics vector", f"env_metrics shape {profile['metric_shape']}; {profile['metric_names']}"),
-        ]
-    )
-    console.section("Split statistics")
-    console.key_values(
-        [
-            ("Transitions / episodes", f"{profile['num_transitions']} / {profile['num_episodes']}"),
-            ("Mean episode length", profile["mean_episode_length"]),
-            ("Reward", profile["reward_stats"]),
-            ("Terminal transition rate", profile["terminal_rate"]),
-            ("Mean admissible actions", profile["mean_admissible_actions"]),
-            ("Behavior log probabilities", profile["behavior_logprob_stats"]),
-            ("OPE precondition", "ready: all behavior_logprobs finite" if profile["finite_behavior_logprobs"] else "FAILED: non-finite behavior_logprobs"),
-        ]
-    )
-    console.section("Behavior provenance")
-    console.table(("behavior policy", "transitions"), sorted(profile["behavior_counts"].items()), max_widths=(36, 16))
-    console.section("Arrays")
-    console.table(("array", "shape", "dtype", "role"), profile["array_rows"], max_widths=(28, 18, 12, 35))
-
-
-def _json_or_empty(path: Path) -> dict:
-    return load_json(path) if path.exists() else {}
-
-
-def _print_run_inspection(console: Console, run_dir: Path, *, raw: bool) -> None:
-    if raw:
-        print(f"Run: {run_dir}")
-        for filename in ("config.json", "environment_spec.json", "metrics_summary.json", "eval_summary.json", "ope_summary.json"):
-            path = run_dir / filename
-            if path.exists():
-                print(f"\n{filename}:")
-                print(path.read_text(encoding="utf-8"))
-        return
-
-    config = _json_or_empty(run_dir / "config.json")
-    metrics = _json_or_empty(run_dir / "metrics_summary.json")
-    evaluation = _json_or_empty(run_dir / "eval_summary.json") or metrics.get("eval_summary", {})
-    ope = _json_or_empty(run_dir / "ope_summary.json")
-    spec = _json_or_empty(run_dir / "environment_spec.json")
-    console.heading("Run inspection", "Training evidence, simulator evaluation, and OPE are reported separately.")
-    console.section("Identity")
-    console.key_values(
-        [
-            ("Directory", run_dir),
-            ("Environment", ENVIRONMENT_LABELS.get(config.get("env_id", spec.get("env_id", "icu_sepsis")), config.get("env_id", spec.get("env_id", "icu_sepsis")))),
-            ("Algorithm", metrics.get("method_id", config.get("algo", "unknown"))),
-            ("Mode", metrics.get("train_mode", train_mode(config) if config else "unknown")),
-            ("Seed", config.get("seed", metrics.get("seed", "unknown"))),
-            ("Observation backend", config.get("obs_backend", spec.get("obs_backend", "unknown"))),
-            ("Checkpoints", ", ".join(name for name in ("checkpoint_best.pt", "checkpoint_last.pt") if (run_dir / name).exists()) or "not found"),
-        ]
-    )
-    train_summary = metrics.get("train_summary", {})
-    if train_summary:
-        console.section("Training summary")
-        preferred = [
-            "offline_train_steps", "offline_batch_size", "total_sampled_transitions", "effective_epochs",
-            "best_validation_loss", "best_validation_step", "final_return", "final_success_rate",
-            "mean_episode_length", "mean_action_stability_l1", "mean_abrupt_jump_rate", "early_stop_reason",
-        ]
-        selected = [(key, train_summary[key]) for key in preferred if key in train_summary]
-        selected.extend((key, value) for key, value in train_summary.items() if key not in dict(selected))
-        console.key_values(selected)
-    if evaluation:
-        console.section("Direct simulator evaluation")
-        console.key_values(evaluation.items())
-        console.note("These values use fresh simulator episodes; they are not offline validation losses and not OPE estimates.")
-    if ope:
-        console.section("Off-policy evaluation on held-out logs")
-        diagnostics = ope.get("diagnostics", {})
-        console.key_values(
-            [
-                ("Dataset", ope.get("config", {}).get("dataset_path", "unknown")),
-                ("Deterministic target", ope.get("config", {}).get("deterministic", "unknown")),
-                ("Bootstrap replicates", ope.get("config", {}).get("bootstrap_replicates", "unknown")),
-                ("Support rate", diagnostics.get("support_rate", "unknown")),
-                ("Out-of-support rate", diagnostics.get("out_of_support_rate", "unknown")),
-                ("Trajectory ESS", diagnostics.get("trajectory_ess", "unknown")),
-                ("Zero-weight trajectories", diagnostics.get("zero_weight_rate", "unknown")),
-            ]
-        )
-        estimator_rows = [
-            (name, values.get("estimate"), values.get("ci95_low"), values.get("ci95_high"))
-            for name, values in ope.get("estimators", {}).items()
-        ]
-        console.table(("estimator", "estimate", "95% CI low", "95% CI high"), estimator_rows, max_widths=(14, 16, 16, 16))
-        console.note("Low support or low ESS means the OPE numbers are diagnostics, not a reliable policy ranking.")
-    console.section("Artifacts")
-    artifact_rows = []
-    for filename in sorted(path.name for path in run_dir.iterdir() if path.is_file()):
-        size_kib = (run_dir / filename).stat().st_size / 1024.0
-        artifact_rows.append((filename, f"{size_kib:.1f} KiB"))
-    console.table(("file", "size"), artifact_rows, max_widths=(48, 16))
-
-
-def _cmd_overview(args: argparse.Namespace) -> int:
-    console = Console(args.color)
-    entries = discover_configs()
-    by_kind = Counter(entry.kind for entry in entries)
-    by_env = Counter(entry.env_id for entry in entries)
-    console.heading("BenchTWM", "Structured offline RL and world-model benchmark operations.")
-    console.section("Repository status")
-    console.key_values(
-        [
-            ("Environments", ", ".join(f"{ENVIRONMENT_LABELS.get(env, env)} ({count} configs)" for env, count in sorted(by_env.items()))),
-            ("Dataset configurations", by_kind["datasets"]),
-            ("Offline configurations", by_kind["offline"]),
-            ("Online configurations", by_kind["online"]),
-            ("Primary use", "fixed logged datasets, validation-selected checkpoints, direct simulator evaluation, optional OPE"),
-        ]
-    )
-    _print_workflow_hint(console)
-    console.section("Start here")
-    console.key_values(
-        [
-            ("Explore", "python scripts/bench.py list --kind offline"),
-            ("EpiCare dev dataset", "python scripts/bench.py dataset --config experiments/datasets/dev/epicare_smart.json"),
-            ("EpiCare dev offline plan", "python scripts/bench.py suite --env epicare --mode offline --tier dev"),
-            ("ICU dev offline plan", "python scripts/bench.py suite --env icu_sepsis --mode offline --tier dev"),
-        ]
-    )
-    return 0
-
-
-def _cmd_list(args: argparse.Namespace) -> int:
-    entries = _filter_entries(
-        discover_configs(),
-        env_id=args.env_id,
-        kind=args.kind,
-        tier=args.tier,
-        algorithm=args.algorithm,
-        name=args.name,
-    )
-    _print_catalog(entries, Console(args.color))
-    return 0
-
-
-def _cmd_dataset(args: argparse.Namespace) -> int:
-    entry = _resolve_config(args, kind="datasets")
-    raw = _load_config(entry.path)
-    console = Console(args.color)
-    _print_dataset_plan(console, entry, raw)
-    metadata = generate_dataset(raw)
-    _print_dataset_metadata(console, metadata)
-    return 0
-
-
-def _cmd_run(args: argparse.Namespace) -> int:
-    entry = _resolve_config(args, kind=args.mode)
-    variants = _resolved_variants(entry)
-    if args.index < 0 or args.index >= len(variants):
-        raise IndexError(f"index={args.index} outside [0, {len(variants) - 1}]")
-    params = variants[args.index]
-    output_dir = output_dir_for_experiment({**params, "method_id": method_id(params)})
-    console = Console(args.color)
-    offline_checks = _validate_offline_inputs(params) if train_mode(params) == "offline" else None
-    _print_algorithm_plan(console, entry, params, output_dir, offline_checks=offline_checks)
-    console.status("Starting", f"variant {args.index + 1}/{len(variants)}")
-    actual_output_dir = run_experiment(params, force_run=args.force)
-    console.status("Completed", _display_path(actual_output_dir))
-    _print_run_inspection(console, Path(actual_output_dir), raw=False)
-    return 0
-
-
-def _cmd_suite(args: argparse.Namespace) -> int:
-    entries = _filter_entries(
-        discover_configs(),
-        env_id=args.env_id,
-        kind=args.mode,
-        tier=args.tier,
-        algorithm=args.algorithm,
-    )
-    if not entries:
-        raise ValueError("No configurations matched the requested suite.")
-    planned: list[tuple[ConfigEntry, int, dict]] = []
-    for entry in entries:
-        for index, params in enumerate(_resolved_variants(entry)):
-            planned.append((entry, index, params))
-    console = Console(args.color)
-    title = "Offline suite plan" if args.mode == "offline" else "Online suite plan"
-    console.heading(title, "Preview is safe. Use --execute only after reviewing the resolved runs below.")
-    console.section("Selection")
-    console.key_values(
-        [
-            ("Environment", ENVIRONMENT_LABELS.get(args.env_id, args.env_id)),
-            ("Tier", args.tier),
-            ("Mode", args.mode),
-            ("Algorithm filter", args.algorithm or "all available"),
-            ("Resolved runs", len(planned)),
-        ]
-    )
-    rows = []
-    for entry, index, params in planned:
-        detail = _offline_detail(params) if args.mode == "offline" else f"episodes={params.get('max_episodes', '?')}"
-        rows.append((entry.algorithm, f"{index + 1}/{entry.num_variants}", detail, entry.relative_path))
-    console.section("Run plan")
-    console.table(("algorithm", "variant", "budget", "configuration"), rows, max_widths=(28, 10, 42, 46))
-    if not args.execute:
-        console.status("Preview only", "Re-run with --execute to start this suite.")
-        return 0
-    for ordinal, (entry, index, params) in enumerate(planned, start=1):
-        console.section(f"Run {ordinal}/{len(planned)} | {method_id(params)}")
-        _print_algorithm_plan(console, entry, params, output_dir_for_experiment({**params, "method_id": method_id(params)}))
-        run_experiment(params, force_run=args.force)
-    console.status("Suite completed", f"{len(planned)} resolved runs")
-    return 0
-
-
-def _offline_detail(params: dict) -> str:
-    steps = int(params.get("offline_train_steps", 0))
-    batch = int(params.get("offline_batch_size", 0))
-    ope = " + OPE" if params.get("ope_enabled") and params.get("ope_dataset_path") else ""
-    return f"{_compact_count(steps)} steps x {batch} = {_compact_count(steps * batch)} samples{ope}"
-
-
-def _compact_count(value: int) -> str:
+def _compact_count(value: int | float) -> str:
     value = int(value)
     if value >= 1_000_000:
         return f"{value / 1_000_000:.3g}M"
@@ -813,142 +62,974 @@ def _compact_count(value: int) -> str:
     return str(value)
 
 
-def _cmd_baselines(args: argparse.Namespace) -> int:
-    entry = _resolve_config(args, kind="datasets")
-    config = _load_config(entry.path)
-    output_root = _resolved_path(args.output_dir)
-    console = Console(args.color)
-    console.heading("Reference-policy evaluation", "Direct simulator baselines declared by the environment adapter.")
-    console.key_values(
-        [
-            ("Environment", ENVIRONMENT_LABELS.get(environment_id(config), environment_id(config))),
-            ("Episodes per policy", args.episodes),
-            ("Policies", args.policies),
-            ("Output", output_root),
-        ]
-    )
-    summaries = {}
-    for name in args.policies:
-        console.status("Evaluating", name)
-        env = make_env(config, obs_backend=config.get("obs_backend"))
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _catalog(args: argparse.Namespace) -> Catalog:
+    catalog = Catalog.load(args.catalog_path)
+    errors = catalog.validate()
+    if errors:
+        raise CatalogError("Catalog validation failed:\n- " + "\n- ".join(errors))
+    return catalog
+
+
+def _root(args: argparse.Namespace) -> Path:
+    return artifact_root(args.artifact_root)
+
+
+def _console(args: argparse.Namespace) -> BenchConsole:
+    return BenchConsole(json_mode=bool(args.json), color=args.color)
+
+
+def _dataset_status(dataset_id: str, root: Path, *, ope_required: bool) -> dict[str, Any]:
+    paths = dataset_artifact_paths(dataset_id, root)
+    required = {"train": paths["train"], "validation": paths["validation"], "metadata": paths["metadata"]}
+    if ope_required:
+        required["ope"] = paths["ope"]
+    missing = {name: str(path) for name, path in required.items() if not path.exists()}
+    return {"ready": not missing, "paths": {name: str(path) for name, path in paths.items()}, "missing": missing}
+
+
+def _dataset_payload(catalog: Catalog, root: Path, dataset_id: str) -> dict[str, Any]:
+    dataset = catalog.dataset(dataset_id)
+    status = _dataset_status(dataset_id, root, ope_required=dataset.ope_enabled)
+    payload: dict[str, Any] = {
+        "id": dataset.identifier,
+        "environment": dataset.env_id,
+        "tier": dataset.tier,
+        "behavior_policy": dataset.behavior_policy,
+        "train_episodes": dataset.episodes,
+        "ope_enabled": dataset.ope_enabled,
+        "description": dataset.description,
+        "availability": status,
+        "compatible_offline_methods": [item.method_id for item in catalog.compatible_methods(dataset.identifier)],
+    }
+    metadata_path = Path(status["paths"]["metadata"])
+    if metadata_path.exists():
+        metadata = load_json(metadata_path)
+        payload["schema_version"] = metadata.get("schema_version")
+        payload["environment_spec"] = metadata.get("environment")
+        payload["splits"] = {key: metadata[key] for key in ("train", "validation", "ope_test") if key in metadata}
+    return payload
+
+
+def _offline_preflight(params: dict[str, Any]) -> dict[str, Any]:
+    required = {"train": Path(params["dataset_path"]), "validation": Path(params["val_dataset_path"])}
+    if bool(params.get("ope_enabled", False)):
+        required["ope"] = Path(params["ope_dataset_path"])
+    missing = {name: str(path) for name, path in required.items() if not path.exists()}
+    return {"ready": not missing, "missing": missing, "paths": {name: str(path) for name, path in required.items()}}
+
+
+def _estimate(params: dict[str, Any]) -> dict[str, Any]:
+    if params.get("train_mode") == "offline":
+        steps = int(params.get("offline_train_steps", 0))
+        batch = int(params.get("offline_batch_size", 0))
+        return {
+            "optimization_steps": steps,
+            "batch_size": batch,
+            "sampled_transitions_estimate": steps * batch,
+            "offline_eval_interval": int(params.get("offline_eval_interval", 0)),
+            "final_eval_episodes": int(params.get("eval_episodes", 0)),
+        }
+    return {
+        "episodes": int(params.get("max_episodes", 0)),
+        "final_eval_episodes": int(params.get("eval_episodes", 0)),
+    }
+
+
+def _early_stopping_plan(params: dict[str, Any]) -> dict[str, Any]:
+    if params.get("train_mode") != "offline":
+        return {"enabled": False, "reason": "Online recipes use their own algorithm-specific checkpoint selection."}
+    descriptions = {
+        "bc": "validation behavior-cloning cross-entropy",
+        "dqn": "validation TD loss",
+        "iql": "validation IQL critic/value/actor objective",
+        "cql": "validation conservative Q objective",
+        "ppo": "validation logged-PPO objective",
+        "raw_model": "validation weighted world-model objective",
+        "latent_model": "validation weighted latent-dynamics objective",
+        "reconstructive_model": "validation weighted reconstruction-and-dynamics objective",
+    }
+    patience = int(params.get("early_stopping_patience", 0))
+    return {
+        "enabled": patience > 0,
+        "monitor": "validation_loss",
+        "meaning": descriptions.get(str(params.get("algo")), "algorithm validation objective"),
+        "direction": "minimize",
+        "patience_validation_checks": patience,
+        "min_delta": float(params.get("early_stopping_min_delta", 0.0)),
+        "validation_check_every_steps": int(params.get("offline_log_interval", 0)),
+        "checkpoint": "lowest validation_loss",
+    }
+
+
+def _ope_plan(params: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(params.get("ope_enabled", False) and params.get("ope_dataset_path"))
+    deterministic = bool(params.get("ope_deterministic", params.get("eval_deterministic", True)))
+    return {
+        "enabled": enabled,
+        "dataset": str(params.get("ope_dataset_path", "")) if enabled else None,
+        "target_policy_mode": "deployed_deterministic" if deterministic else "deployed_stochastic",
+        "bootstrap_replicates": int(params.get("ope_bootstrap_replicates", 200)) if enabled else 0,
+    }
+
+
+def _ope_target_mode(config: dict[str, Any], requested: str) -> tuple[bool, str]:
+    deployed_deterministic = bool(config.get("ope_deterministic", config.get("eval_deterministic", True)))
+    if requested == "stochastic":
+        return False, "counterfactual_stochastic"
+    return deployed_deterministic, "deployed_deterministic" if deployed_deterministic else "deployed_stochastic"
+
+
+@contextlib.contextmanager
+def _device(requested: str) -> Iterator[None]:
+    previous = os.environ.get("BENCH_DEVICE")
+    os.environ["BENCH_DEVICE"] = requested
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("BENCH_DEVICE", None)
+        else:
+            os.environ["BENCH_DEVICE"] = previous
+
+
+def _load_policy(run_dir: Path):
+    config = load_json(run_dir / "config.json")
+    checkpoint_path = run_dir / "checkpoint_best.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Missing best checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    return config, get_policy_loader(config["algo"])(config, checkpoint)
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    console = _console(args)
+    packages = {}
+    for name in ("numpy", "pandas", "torch", "rich", "gymnasium", "optuna"):
         try:
-            policy = make_reference_policy(env, name, seed=int(config.get("seed", 0)))
-        finally:
-            env.close()
-        policy_config = {**config, "algo": "baseline", "method_id": name}
-        result = evaluate_policy(
-            policy,
-            config=policy_config,
-            num_episodes=args.episodes,
-            eval_seed_base=int(config.get("eval_seed_base", 100000)),
-            output_dir=output_root / name,
-            checkpoint_name=name,
-            export_csv=True,
-            show_progress=True,
+            module = importlib.import_module(name)
+            packages[name] = getattr(module, "__version__", "available")
+        except Exception as exc:
+            packages[name] = f"unavailable: {exc}"
+    payload = {
+        "project_root": str(PROJECT_ROOT),
+        "artifact_root": str(_root(args)),
+        "python": sys.version.split()[0],
+        "packages": packages,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
+        "vendored_cores": {
+            "icu_sepsis": str(PROJECT_ROOT / "third_party" / "icu-sepsis"),
+            "epicare": str(PROJECT_ROOT / "third_party" / "epicare"),
+        },
+    }
+    if args.json:
+        console.emit(payload)
+    else:
+        console.title("BenchTWM Doctor", "Runtime, hardware, and local benchmark cores")
+        console.table("Runtime", ("item", "value"), [("Python", payload["python"]), ("Artifact root", payload["artifact_root"]), ("CUDA", payload["cuda_available"]), ("GPUs", ", ".join(payload["cuda_devices"]) or "none")])
+        console.table("Packages", ("package", "version"), packages.items())
+    return 0
+
+
+def _cmd_catalog(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    datasets = [_dataset_payload(catalog, _root(args), item.identifier) for item in catalog.datasets]
+    payload = {"schema_version": catalog.schema_version, "datasets": datasets, "recipes": [item.__dict__ | {"config_path": str(item.config_path)} for item in catalog.recipes]}
+    if args.json:
+        console.emit(payload)
+        return 0
+    console.title("BenchTWM Catalog", "Curated datasets and compatible benchmark methods")
+    console.table(
+        "Datasets",
+        ("id", "env", "behavior", "train", "OPE", "state"),
+        [
+            (item["id"], item["environment"], item["behavior_policy"], _compact_count(item["train_episodes"]), "yes" if item["ope_enabled"] else "no", "ready" if item["availability"]["ready"] else "build required")
+            for item in datasets
+        ],
+    )
+    console.table(
+        "Offline Methods",
+        ("environment", "tier", "method", "track", "algorithm", "description"),
+        [(item.env_id, item.tier, item.method_id, item.track, item.algo, item.description) for item in catalog.recipes if item.mode == "offline"],
+    )
+    return 0
+
+
+def _cmd_dataset_list(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    payload = {"datasets": [_dataset_payload(catalog, _root(args), item.identifier) for item in catalog.datasets]}
+    if args.json:
+        console.emit(payload)
+    else:
+        console.title("Offline Datasets", "Use dataset show <id> for schema and compatible methods.")
+        console.table(
+            "Datasets",
+            ("id", "environment", "behavior", "train", "OPE", "state"),
+            [
+                (item["id"], item["environment"], item["behavior_policy"], _compact_count(item["train_episodes"]), "yes" if item["ope_enabled"] else "no", "ready" if item["availability"]["ready"] else "build required")
+                for item in payload["datasets"]
+            ],
         )
-        summaries[name] = result["summary"]
-    save_json(summaries, output_root / "baseline_summary.json")
-    console.section("Direct evaluation summary")
-    preferred = ("mean_return", "mean_success", "mean_adverse_event_rate", "mean_symptom_burden", "mean_length")
-    rows = [(name, *[summary.get(key, "-") for key in preferred]) for name, summary in summaries.items()]
-    console.table(("policy", "return", "success", "adverse events", "primary metric", "length"), rows, max_widths=(16, 14, 12, 16, 16, 12))
-    console.status("Artifacts", _display_path(output_root))
+    return 0
+
+
+def _cmd_dataset_show(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    payload = _dataset_payload(catalog, _root(args), args.dataset_id)
+    if args.json:
+        console.emit(payload)
+    else:
+        console.title(f"Dataset: {payload['id']}", payload["description"])
+        console.table("Identity", ("field", "value"), [(key, value) for key, value in payload.items() if key not in {"availability", "environment_spec", "splits", "compatible_offline_methods"}])
+        console.table("Availability", ("split", "path"), payload["availability"]["paths"].items())
+        console.table("Compatible Offline Methods", ("method",), [(name,) for name in payload["compatible_offline_methods"]])
+        if payload.get("splits"):
+            console.note("Dataset metadata is present and describes train, validation, and optional OPE splits.")
+    return 0
+
+
+def _cmd_dataset_build(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    config = catalog.dataset_config(args.dataset_id, artifact_root=_root(args), force=args.force)
+    status = _dataset_status(args.dataset_id, _root(args), ope_required=bool(config.get("ope_enabled", False)))
+    payload = {"dataset_id": args.dataset_id, "config": config, "availability_before": status}
+    if args.dry_run:
+        if args.json:
+            console.emit(payload)
+        else:
+            console.title("Dataset Build Plan", args.dataset_id)
+            console.table("Configuration", ("field", "value"), config.items())
+            console.note("Dry run only. No data will be generated.")
+        return 0
+    metadata = generate_dataset({**config, "show_progress": not args.no_progress, "quiet": bool(args.json)})
+    payload["metadata"] = metadata
+    if args.json:
+        console.emit(payload)
+    else:
+        console.success(f"Dataset ready at {config['output_dir']}")
+    return 0
+
+
+def _prepare_run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], Path, dict[str, Any]]:
+    catalog = _catalog(args)
+    overrides = parse_overrides(args.overrides)
+    params, dataset, recipe = catalog.run_config(
+        args.dataset_id,
+        args.method_id,
+        mode=args.mode,
+        artifact_root=_root(args),
+        seed=args.seed,
+        overrides=overrides,
+    )
+    params["show_progress"] = not args.no_progress
+    preflight = _offline_preflight(params) if args.mode == "offline" else {"ready": True, "missing": {}, "paths": {}}
+    output_dir = run_directory(params, dataset_id=dataset.identifier, method_id=recipe.method_id, root=_root(args))
+    manifest = initial_manifest(params, dataset_id=dataset.identifier, method_id=recipe.method_id, run_dir=output_dir, device=args.device)
+    return params, preflight, output_dir, manifest
+
+
+def _print_run_plan(console: BenchConsole, params: dict[str, Any], preflight: dict[str, Any], output_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "run_id": manifest["run_id"],
+        "output_dir": str(output_dir),
+        "environment": params["env_id"],
+        "dataset_id": params["dataset_id"],
+        "task_id": params["task_id"],
+        "recipe_id": params["recipe_id"],
+        "algorithm": params["algo"],
+        "track": params.get("track"),
+        "mode": params["train_mode"],
+        "seed": params["seed"],
+        "observation_backend": params["obs_backend"],
+        "estimate": _estimate(params),
+        "early_stopping": _early_stopping_plan(params),
+        "ope": _ope_plan(params),
+        "preflight": preflight,
+    }
+    if console.json_mode:
+        return payload
+    console.title("Training Plan", "Offline optimization, simulator evaluation, and OPE remain separate evidence streams.")
+    console.table(
+        "Run",
+        ("field", "value"),
+        [(key, payload[key]) for key in ("run_id", "output_dir", "environment", "dataset_id", "task_id", "recipe_id", "algorithm", "track", "mode", "seed", "observation_backend")],
+    )
+    console.table("Execution Budget", ("field", "value"), payload["estimate"].items())
+    console.table("Early Stopping", ("field", "value"), payload["early_stopping"].items())
+    if payload["ope"]["enabled"]:
+        console.table("Held-out OPE", ("field", "value"), payload["ope"].items())
+    console.table("Data Preflight", ("field", "value"), [("ready", preflight["ready"]), ("missing", preflight["missing"]), ("paths", preflight["paths"])])
+    if not preflight["ready"]:
+        console.warning("Dataset is incomplete. Build it before training.")
+    return payload
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    console = _console(args)
+    params, preflight, output_dir, manifest = _prepare_run(args)
+    plan = _print_run_plan(console, params, preflight, output_dir, manifest)
+    if args.dry_run:
+        if args.json:
+            console.emit(plan)
+        return 0
+    if not preflight["ready"]:
+        raise FileNotFoundError(
+            f"Dataset {args.dataset_id!r} is not ready. Run: python scripts/bench.py dataset build {args.dataset_id}"
+        )
+    with _device(args.device):
+        actual_output = run_experiment(params, force_run=args.force, output_dir=output_dir, manifest=manifest, quiet=True)
+    if args.json:
+        console.emit({**plan, "actual_output_dir": str(actual_output), "status": "completed"})
+    else:
+        console.success(f"Completed {manifest['run_id']}")
+        console.note(f"Artifacts: {actual_output}")
+    return 0
+
+
+def _parse_seeds(raw: str) -> list[int]:
+    try:
+        values = [int(item.strip()) for item in raw.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError("--seeds must contain comma-separated integers") from exc
+    if not values:
+        raise ValueError("--seeds must contain at least one seed")
+    return values
+
+
+def _cmd_suite(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    methods = args.methods or [item.method_id for item in catalog.compatible_methods(args.dataset_id, mode=args.mode)]
+    seeds = _parse_seeds(args.seeds)
+    jobs: list[QueueJob] = []
+    plans = []
+    for method_id in methods:
+        for seed in seeds:
+            copied = argparse.Namespace(**vars(args))
+            copied.method_id = method_id
+            copied.seed = seed
+            params, preflight, output_dir, manifest = _prepare_run(copied)
+            plans.append({"method": method_id, "seed": seed, "output_dir": str(output_dir), "preflight": preflight, "estimate": _estimate(params)})
+            jobs.append(QueueJob(name=f"{method_id}-seed-{seed}", params=params, output_dir=str(output_dir), manifest=manifest, device=args.device, force=args.force))
+    payload = {"dataset_id": args.dataset_id, "mode": args.mode, "jobs": plans}
+    if args.dry_run or not args.execute:
+        if args.json:
+            console.emit(payload)
+        else:
+            console.title("Suite Plan", "Use --execute after reviewing the resolved jobs.")
+            console.table("Jobs", ("method", "seed", "ready", "output"), [(item["method"], item["seed"], item["preflight"]["ready"], item["output_dir"]) for item in plans])
+        return 0
+    missing = [plan for plan in plans if not plan["preflight"]["ready"]]
+    if missing:
+        raise FileNotFoundError(f"Dataset {args.dataset_id!r} is incomplete. Run dataset build before executing the suite.")
+    queue_dir, manifest = execute_queue(jobs, root=_root(args), max_workers=args.jobs, gpus=args.gpus, resume=not args.force)
+    if args.json:
+        console.emit({"queue_dir": str(queue_dir), "manifest": manifest})
+    else:
+        console.success(f"Queue completed: {queue_dir}")
+        console.table("Queue Jobs", ("name", "status", "log"), [(item["name"], item["status"], item["log_path"]) for item in manifest["jobs"]])
+    return 0 if not manifest["failures"] else 1
+
+
+def _run_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_dir": str(run_dir),
+        "run_id": manifest.get("run_id"),
+        "status": manifest.get("status"),
+        "dataset_id": manifest.get("dataset_id"),
+        "task_id": manifest.get("task_id"),
+        "method_id": manifest.get("method_id"),
+        "track": manifest.get("track"),
+        "environment": manifest.get("environment"),
+        "seed": manifest.get("seed"),
+        "updated_at": manifest.get("updated_at"),
+    }
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    console = _console(args)
+    if args.run:
+        run_dir = resolve_run(args.run, _root(args))
+        payload = _run_summary(run_dir, load_manifest(run_dir))
+        payload["artifacts"] = sorted(path.name for path in run_dir.iterdir() if path.is_file())
+        if args.json:
+            console.emit(payload)
+        else:
+            console.title("Run Status", payload["run_id"])
+            console.table("Identity", ("field", "value"), payload.items())
+        return 0
+    runs = [_run_summary(path, manifest) for path, manifest in discover_runs(_root(args))[: args.limit]]
+    if args.json:
+        console.emit({"runs": runs})
+    else:
+        console.title("Run Status", f"Most recent {len(runs)} clean-layout runs")
+        console.table("Runs", ("status", "dataset", "method", "seed", "updated", "directory"), [(item["status"], item["dataset_id"], item["method_id"], item["seed"], item["updated_at"], item["run_dir"]) for item in runs])
     return 0
 
 
 def _cmd_inspect_dataset(args: argparse.Namespace) -> int:
-    path = _resolved_path(args.path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    metadata_path = path.parent / "metadata.json"
-    metadata = load_json(metadata_path) if metadata_path.exists() else None
-    profile = _dataset_profile(path, metadata)
-    console = Console(args.color)
-    _print_dataset_inspection(console, path, metadata, profile)
-    if args.full_metadata and metadata is not None:
-        console.section("Raw metadata")
-        print(json.dumps(metadata, indent=2, sort_keys=True))
+    catalog = _catalog(args)
+    console = _console(args)
+    payload = _dataset_payload(catalog, _root(args), args.dataset_id)
+    status = payload["availability"]
+    if status["ready"]:
+        train = np.load(status["paths"]["train"])
+        payload["arrays"] = {key: {"shape": list(train[key].shape), "dtype": str(train[key].dtype)} for key in sorted(train.files)}
+        payload["transitions"] = int(train["actions"].shape[0])
+        payload["episodes"] = int(np.unique(train["episode_ids"]).size)
+    if args.json:
+        console.emit(payload)
+    else:
+        console.title("Dataset Inspection", args.dataset_id)
+        if not status["ready"]:
+            console.warning(f"Dataset is missing: {status['missing']}")
+        else:
+            console.table("Arrays", ("array", "shape", "dtype"), [(key, value["shape"], value["dtype"]) for key, value in payload["arrays"].items()])
     return 0
 
 
 def _cmd_inspect_run(args: argparse.Namespace) -> int:
-    run_dir = _resolved_path(args.path)
-    if not run_dir.exists():
-        raise FileNotFoundError(run_dir)
-    _print_run_inspection(Console(args.color), run_dir, raw=bool(args.raw))
+    console = _console(args)
+    run_dir = resolve_run(args.run, _root(args))
+    payload = _run_summary(run_dir, load_manifest(run_dir))
+    payload["optimization"] = load_json(run_dir / "metrics_summary.json").get("train_summary", {}) if (run_dir / "metrics_summary.json").exists() else {}
+    payload["direct_evaluation"] = load_json(run_dir / "eval_summary.json") if (run_dir / "eval_summary.json").exists() else {}
+    payload["ope"] = load_json(run_dir / "ope_summary.json") if (run_dir / "ope_summary.json").exists() else {}
+    if payload["ope"]:
+        payload["ope_recompute_recommended"] = int(payload["ope"].get("schema_version", 0)) < 2
+    if args.json:
+        console.emit(payload)
+    else:
+        console.title("Run Inspection", payload["run_id"])
+        console.table("Optimization", ("metric", "value"), payload["optimization"].items())
+        console.table("Direct Evaluation", ("metric", "value"), payload["direct_evaluation"].items())
+        if payload["ope"]:
+            console.table("OPE Diagnostics", ("metric", "value"), payload["ope"].get("diagnostics", {}).items())
+            console.table("OPE Reliability", ("metric", "value"), payload["ope"].get("reliability", {}).items())
+            if payload["ope_recompute_recommended"]:
+                console.warning("This OPE summary predates the WPDIS correction and reliability diagnostics. Recompute it with: python scripts/bench.py ope <run> --write-canonical")
     return 0
 
 
-def _add_selector_arguments(parser: argparse.ArgumentParser, *, include_algorithm: bool = True) -> None:
-    parser.add_argument("--config", help="Explicit JSON config path; takes precedence over catalog filters.")
-    parser.add_argument("--env", dest="env_id", choices=["icu_sepsis", "epicare"], help="Environment filter.")
-    parser.add_argument("--tier", choices=["dev", "final"], help="Configuration tier filter.")
-    if include_algorithm:
-        parser.add_argument("--algorithm", help="Algorithm filter, e.g. dqn or raw_model.")
-    parser.add_argument("--name", help="Config stem or relative path without .json.")
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    console = _console(args)
+    run_dir = resolve_run(args.run, _root(args))
+    config, policy = _load_policy(run_dir)
+    destination = ensure_dir(run_dir / "evaluations" / _timestamp())
+    with _device(args.device):
+        result = evaluate_policy(
+            policy,
+            config=config,
+            num_episodes=args.episodes or int(config.get("eval_episodes", 100)),
+            eval_seed_base=args.seed_base if args.seed_base is not None else int(config.get("eval_seed_base", 100000)),
+            output_dir=destination,
+            checkpoint_name="best-re-evaluated",
+            export_csv=True,
+            show_progress=not args.no_progress,
+        )
+    save_json(result["summary"], destination / "eval_summary.json")
+    payload = {"run": str(run_dir), "evaluation_dir": str(destination), "summary": result["summary"]}
+    if args.json:
+        console.emit(payload)
+    else:
+        console.success(f"Evaluation written to {destination}")
+        console.table("Direct Simulator Evaluation", ("metric", "value"), result["summary"].items())
+    return 0
+
+
+def _cmd_ope(args: argparse.Namespace) -> int:
+    console = _console(args)
+    if args.write_canonical and args.target_mode != "deployed":
+        raise ValueError("--write-canonical is only valid with --target-mode deployed")
+    run_dir = resolve_run(args.run, _root(args))
+    config, policy = _load_policy(run_dir)
+    dataset_path = Path(config.get("ope_dataset_path", ""))
+    if not dataset_path.exists():
+        raise FileNotFoundError("This run has no available held-out OPE dataset")
+    destination = ensure_dir(run_dir / "ope" / _timestamp())
+    deterministic, target_mode = _ope_target_mode(config, args.target_mode)
+    summary, bootstrap = evaluate_ope(
+        policy,
+        dataset_path=dataset_path,
+        obs_backend=config["obs_backend"],
+        gamma=float(config.get("gamma", 1.0)),
+        bootstrap_replicates=args.bootstrap,
+        seed=int(config.get("seed", 0)),
+        deterministic=deterministic,
+        target_policy_mode=target_mode,
+        show_progress=not args.no_progress,
+        progress_desc="OPE",
+    )
+    summary["task_id"] = str(config.get("task_id", ""))
+    summary["track"] = str(config.get("track", ""))
+    export_ope(summary, bootstrap, destination)
+    canonical_updated = False
+    if args.write_canonical:
+        export_ope(summary, bootstrap, run_dir)
+        canonical_updated = True
+    payload = {"run": str(run_dir), "ope_dir": str(destination), "canonical_updated": canonical_updated, "summary": summary}
+    if args.json:
+        console.emit(payload)
+    else:
+        console.success(f"OPE written to {destination}")
+        console.table("OPE Target", ("field", "value"), summary["config"].items())
+        console.table("OPE Diagnostics", ("metric", "value"), summary["diagnostics"].items())
+        console.table("OPE Reliability", ("metric", "value"), summary["reliability"].items())
+        console.table("Policy Probability Contract", ("metric", "value"), summary["policy_probability_contract"].items())
+        console.table("OPE Estimates", ("estimator", "estimate", "CI 95%"), [(name, values["estimate"], f"[{values['ci95_low']}, {values['ci95_high']}]") for name, values in summary["estimators"].items()])
+        if args.target_mode == "stochastic":
+            console.warning("This evaluates a stochastic counterfactual policy, not a deterministic deployed policy.")
+        if summary["reliability"]["status"] != "usable":
+            console.warning(summary["reliability"]["message"])
+        if summary["policy_probability_contract"]["status"] != "exact":
+            console.warning(summary["policy_probability_contract"]["message"])
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    console = _console(args)
+    run_dir = resolve_run(args.run, _root(args))
+    destination, summary = build_run_report(run_dir, root=_root(args))
+    if args.json:
+        console.emit({"report_dir": str(destination), "summary": summary})
+    else:
+        console.success(f"Report written to {destination}")
+        console.note("The report keeps optimization, direct evaluation, and OPE in separate sections.")
+    return 0
+
+
+def _cmd_baselines(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    dataset = catalog.dataset(args.dataset_id)
+    config = catalog.dataset_config(dataset.identifier, artifact_root=_root(args))
+    destination = ensure_dir(_root(args) / "reports" / "baselines" / dataset.identifier / _timestamp())
+    if args.policies:
+        policies = args.policies
+    elif dataset.env_id == "epicare":
+        policies = ["smart", "soc", "random", "oracle"]
+    else:
+        # ICU reference policies are evaluated directly in the simulator; the
+        # mixed collector, its components, and a random admissible policy are
+        # all useful anchors for interpreting a learned policy's return.
+        policies = ["mixed", "expert", "optimal", "random_admissible"]
+    summaries = {}
+    for name in policies:
+        env = make_env(config, obs_backend=config["obs_backend"])
+        try:
+            policy = make_reference_policy(env, name, seed=int(config["seed"]), config=config)
+        finally:
+            env.close()
+        result = evaluate_policy(
+            policy,
+            config={**config, "algo": "baseline", "method_id": name},
+            num_episodes=args.episodes,
+            eval_seed_base=100000,
+            output_dir=destination / name,
+            checkpoint_name=name,
+            export_csv=True,
+            show_progress=not args.no_progress,
+        )
+        summaries[name] = result["summary"]
+    save_json(summaries, destination / "baseline_summary.json")
+    save_json(
+        {
+            "schema_version": 1,
+            "dataset_id": dataset.identifier,
+            "task_id": config.get("task_id"),
+            "track": "reference_baseline",
+            "environment": dataset.env_id,
+            "policies": list(summaries),
+        },
+        destination / "baseline_manifest.json",
+    )
+    if args.json:
+        console.emit({"output_dir": str(destination), "summaries": summaries})
+    else:
+        console.success(f"Baseline evaluation written to {destination}")
+        console.table("Direct Baselines", ("policy", "return", "success", "adverse events", "length"), [(name, values.get("mean_return"), values.get("mean_success"), values.get("mean_adverse_event_rate", "-"), values.get("mean_length")) for name, values in summaries.items()])
+    return 0
+
+
+def _research_jobs(args: argparse.Namespace, *, dataset_ids: list[str], methods: list[str], seeds: list[int]) -> list[QueueJob]:
+    jobs: list[QueueJob] = []
+    for dataset_id in dataset_ids:
+        for method_id in methods:
+            for seed in seeds:
+                copied = argparse.Namespace(**vars(args))
+                copied.dataset_id = dataset_id
+                copied.method_id = method_id
+                copied.seed = seed
+                params, preflight, output_dir, manifest = _prepare_run(copied)
+                if not preflight["ready"]:
+                    raise FileNotFoundError(f"Dataset {dataset_id!r} is incomplete; build it before research execution")
+                jobs.append(QueueJob(name=f"{dataset_id}:{method_id}:seed-{seed}", params=params, output_dir=str(output_dir), manifest=manifest, device=args.device, force=args.force))
+    return jobs
+
+
+def _cmd_research_sweep(args: argparse.Namespace) -> int:
+    copied = argparse.Namespace(**vars(args))
+    copied.methods = [args.method_id]
+    copied.seeds = args.seeds
+    copied.execute = args.execute
+    return _cmd_suite(copied)
+
+
+def _cmd_research_matrix(args: argparse.Namespace) -> int:
+    console = _console(args)
+    definition_path = Path(args.definition)
+    if not definition_path.is_absolute():
+        definition_path = PROJECT_ROOT / definition_path
+    definition = load_json(definition_path)
+    copied = argparse.Namespace(**vars(args))
+    copied.mode = str(definition.get("mode", "offline"))
+    if "jobs" in definition:
+        jobs = []
+        for item in definition["jobs"]:
+            jobs.extend(
+                _research_jobs(
+                    copied,
+                    dataset_ids=[str(item["dataset"])],
+                    methods=[str(method) for method in item["methods"]],
+                    seeds=[int(seed) for seed in item.get("seeds", definition.get("seeds", [0]))],
+                )
+            )
+    else:
+        dataset_ids = list(definition["datasets"])
+        methods = list(definition["methods"])
+        seeds = [int(value) for value in definition.get("seeds", [0])]
+        jobs = _research_jobs(copied, dataset_ids=dataset_ids, methods=methods, seeds=seeds)
+    if args.dry_run or not args.execute:
+        payload = {"definition": str(definition_path), "jobs": [{"name": job.name, "output_dir": job.output_dir} for job in jobs]}
+        if args.json:
+            console.emit(payload)
+        else:
+            console.title("Research Matrix Plan", str(definition_path))
+            console.table("Jobs", ("name", "output"), [(item["name"], item["output_dir"]) for item in payload["jobs"]])
+        return 0
+    queue_dir, manifest = execute_queue(jobs, root=_root(args), max_workers=args.jobs, gpus=args.gpus, resume=not args.force)
+    if args.json:
+        console.emit({"queue_dir": str(queue_dir), "manifest": manifest})
+    else:
+        console.success(f"Research matrix completed: {queue_dir}")
+    return 0 if not manifest["failures"] else 1
+
+
+def _tuning_space(trial, algo: str) -> dict[str, Any]:
+    if algo == "dqn":
+        return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "tau": trial.suggest_float("tau", 1e-4, 0.1, log=True)}
+    if algo == "ppo":
+        return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "offline_bc_weight": trial.suggest_float("offline_bc_weight", 0.0, 1.0)}
+    return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-3, log=True), "cem_horizon": trial.suggest_int("cem_horizon", 3, 12)}
+
+
+def _cmd_research_tune(args: argparse.Namespace) -> int:
+    import optuna
+
+    catalog = _catalog(args)
+    console = _console(args)
+    base_params, preflight, _, _ = _prepare_run(args)
+    if not preflight["ready"]:
+        raise FileNotFoundError(f"Dataset {args.dataset_id!r} is incomplete; build it before tuning")
+    study_dir = ensure_dir(_root(args) / "studies")
+    study_name = f"{args.dataset_id.replace('/', '__')}__{args.method_id.replace('/', '__')}"
+    study = optuna.create_study(study_name=study_name, direction="minimize", storage=f"sqlite:///{study_dir / (study_name + '.sqlite3')}", load_if_exists=True)
+
+    def objective(trial):
+        params = dict(base_params)
+        params.update(_tuning_space(trial, params["algo"]))
+        params["tuning_trial"] = int(trial.number)
+        output_dir = run_directory(params, dataset_id=args.dataset_id, method_id=args.method_id, root=_root(args))
+        manifest = initial_manifest(params, dataset_id=args.dataset_id, method_id=args.method_id, run_dir=output_dir, device=args.device)
+        with _device(args.device):
+            run_experiment(params, force_run=args.force, output_dir=output_dir, manifest=manifest, quiet=True)
+        summary = load_json(output_dir / "metrics_summary.json").get("train_summary", {})
+        value = summary.get("best_validation_loss")
+        if value is None:
+            raise RuntimeError("The selected method did not emit best_validation_loss for Optuna")
+        return float(value)
+
+    if args.dry_run:
+        payload = {"study": study_name, "trials": args.trials, "base_config": base_params}
+        if args.json:
+            console.emit(payload)
+        else:
+            console.title("Tuning Plan", study_name)
+            console.note("Dry run only. No Optuna trials will be launched.")
+        return 0
+    study.optimize(objective, n_trials=args.trials)
+    payload = {"study": study_name, "storage": str(study_dir / (study_name + '.sqlite3')), "best_value": study.best_value, "best_params": study.best_params}
+    if args.json:
+        console.emit(payload)
+    else:
+        console.success(f"Tuning completed: {study_name}")
+        console.table("Best Trial", ("field", "value"), payload.items())
+    return 0
+
+
+def _cmd_research_collect(args: argparse.Namespace) -> int:
+    console = _console(args)
+    rows = []
+    for run_dir, manifest in discover_runs(_root(args)):
+        row = _run_summary(run_dir, manifest)
+        summary_path = run_dir / "metrics_summary.csv"
+        if summary_path.exists():
+            with summary_path.open("r", encoding="utf-8") as handle:
+                row.update(next(csv.DictReader(handle), {}))
+        rows.append(row)
+    destination = ensure_dir(_root(args) / "reports") / "run_index.csv"
+    fieldnames = sorted({key for row in rows for key in row})
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    if args.json:
+        console.emit({"output": str(destination), "run_count": len(rows), "columns": fieldnames})
+    else:
+        console.success(f"Collected {len(rows)} runs into {destination}")
+    return 0
+
+
+def _cmd_research_summarize(args: argparse.Namespace) -> int:
+    console = _console(args)
+    payload = summarize_pilot(_root(args), output_dir=Path(args.output_dir) if args.output_dir else None)
+    if args.json:
+        console.emit(
+            {
+                "output_dir": payload["output_dir"],
+                "run_count": len(payload["rows"]),
+                "aggregate_count": len(payload["aggregate"]),
+                "planning_gain_count": len(payload["planning_gain"]),
+            }
+        )
+    else:
+        console.success(f"v0 pilot summary written to {payload['output_dir']}")
+        console.table(
+            "Best direct baseline",
+            ("task", "method", "return", "success"),
+            [
+                (task, item["method_id"], item.get("mean_return_mean"), item.get("mean_success_mean"))
+                for task, item in sorted(payload["best_direct_baselines"].items())
+            ],
+        )
+    return 0
+
+
+def _cmd_research_reevaluate(args: argparse.Namespace) -> int:
+    console = _console(args)
+    outputs = []
+    for reference in args.runs:
+        copied = argparse.Namespace(**vars(args))
+        copied.run = reference
+        _cmd_evaluate(copied)
+        outputs.append(reference)
+    if not args.json:
+        console.success(f"Re-evaluated {len(outputs)} run(s)")
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    catalog = _catalog(args)
+    console = _console(args)
+    payload: dict[str, Any] = {"catalog": "valid", "datasets": len(catalog.datasets), "recipes": len(catalog.recipes), "smoke": []}
+    if args.smoke:
+        for env_id in sorted(catalog.payload["environments"]):
+            recipe = next(item for item in catalog.recipes if item.env_id == env_id)
+            config = Catalog._materialize(load_json(recipe.config_path), seed=0)
+            config.update({"env_id": env_id, "environment_seed": 1, "env_kwargs": {}})
+            env = make_env(config, obs_backend=config["obs_backend"], seed=0)
+            try:
+                _, info = env.reset(seed=0)
+                action = int(info["admissible_actions"][0])
+                _, reward, terminated, truncated, _ = env.step(action)
+                payload["smoke"].append({"env_id": env_id, "reward": float(reward), "done": bool(terminated or truncated)})
+            finally:
+                env.close()
+    if args.json:
+        console.emit(payload)
+    else:
+        console.success("Catalog and recipes are valid")
+        if payload["smoke"]:
+            console.table("Environment Smoke", ("env", "reward", "done"), [(item["env_id"], item["reward"], item["done"]) for item in payload["smoke"]])
+    return 0
+
+
+def _add_common(parser: argparse.ArgumentParser, *, run: bool = False) -> None:
+    if run:
+        parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=JSON", help="Typed config override applied only to this run.")
+        parser.add_argument("--seed", type=int, default=None)
+        parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+        parser.add_argument("--force", action="store_true", help="Run even when a completed artifact already exists.")
+        parser.add_argument("--dry-run", action="store_true", help="Resolve and display work without writing artifacts.")
+        parser.add_argument("--no-progress", action="store_true")
+
+
+def _normalize_global_flags(argv: list[str]) -> list[str]:
+    """Allow global display/path flags before or after a subcommand."""
+
+    leading: list[str] = []
+    remaining: list[str] = []
+    index = 0
+    value_flags = {"--artifact-root", "--catalog-path", "--color"}
+    while index < len(argv):
+        token = argv[index]
+        if token == "--json":
+            leading.append(token)
+        elif token in value_flags:
+            if index + 1 >= len(argv):
+                remaining.append(token)
+            else:
+                leading.extend((token, argv[index + 1]))
+                index += 1
+        else:
+            remaining.append(token)
+        index += 1
+    return [*leading, *remaining]
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--color", choices=["auto", "always", "never"], default="auto", help="Terminal color policy (default: auto).")
+    parser.add_argument("--artifact-root", default=str(PROJECT_ROOT / "artifacts"))
+    parser.add_argument("--catalog-path", default=str(PROJECT_ROOT / "configs" / "catalog.json"))
+    parser.add_argument("--color", choices=["auto", "never"], default="auto")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON for inspection commands.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    overview_parser = subparsers.add_parser("overview", help="Show the offline-first workflow and repository catalog counts.")
-    overview_parser.set_defaults(handler=_cmd_overview)
+    doctor = subparsers.add_parser("doctor", help="Inspect runtime dependencies, hardware, and vendored cores.")
+    doctor.set_defaults(handler=_cmd_doctor)
+    catalog = subparsers.add_parser("catalog", help="List curated datasets and method recipes.")
+    catalog.set_defaults(handler=_cmd_catalog)
 
-    list_parser = subparsers.add_parser("list", help="List configurations grouped by the benchmark workflow.")
-    list_parser.add_argument("--env", dest="env_id", choices=["icu_sepsis", "epicare"])
-    list_parser.add_argument("--kind", choices=["datasets", "online", "offline"])
-    list_parser.add_argument("--tier", choices=["dev", "final"])
-    list_parser.add_argument("--algorithm")
-    list_parser.add_argument("--name")
-    list_parser.set_defaults(handler=_cmd_list)
+    dataset = subparsers.add_parser("dataset", help="List, inspect, or build offline datasets.")
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_list = dataset_sub.add_parser("list", help="List curated datasets.")
+    dataset_list.set_defaults(handler=_cmd_dataset_list)
+    dataset_show = dataset_sub.add_parser("show", help="Show one dataset recipe and availability.")
+    dataset_show.add_argument("dataset_id")
+    dataset_show.set_defaults(handler=_cmd_dataset_show)
+    dataset_build = dataset_sub.add_parser("build", help="Generate train, validation, and optional OPE splits.")
+    dataset_build.add_argument("dataset_id")
+    dataset_build.add_argument("--force", action="store_true")
+    dataset_build.add_argument("--dry-run", action="store_true")
+    dataset_build.add_argument("--no-progress", action="store_true")
+    dataset_build.set_defaults(handler=_cmd_dataset_build)
 
-    dataset_parser = subparsers.add_parser("dataset", help="Generate and summarize one offline dataset.")
-    _add_selector_arguments(dataset_parser, include_algorithm=False)
-    dataset_parser.set_defaults(handler=_cmd_dataset)
+    train = subparsers.add_parser("train", help="Train one named recipe; offline is the default.")
+    train.add_argument("dataset_id")
+    train.add_argument("method_id")
+    train.add_argument("--mode", choices=["offline", "online"], default="offline")
+    _add_common(train, run=True)
+    train.set_defaults(handler=_cmd_train)
 
-    run_parser = subparsers.add_parser("run", help="Preflight and run one resolved online or offline experiment.")
-    _add_selector_arguments(run_parser)
-    run_parser.add_argument("--mode", choices=["online", "offline"], default="offline")
-    run_parser.add_argument("--index", type=int, default=0, help="Index in the JSON parameter sweep.")
-    run_parser.add_argument("--force", action="store_true", help="Re-run even if an output already exists.")
-    run_parser.set_defaults(handler=_cmd_run)
+    suite = subparsers.add_parser("suite", help="Plan or execute a local queue over named methods and seeds.")
+    suite.add_argument("dataset_id")
+    suite.add_argument("--method", dest="methods", action="append", help="Limit to a compatible method; repeatable.")
+    suite.add_argument("--mode", choices=["offline", "online"], default="offline")
+    suite.add_argument("--seeds", default="0")
+    suite.add_argument("--execute", action="store_true")
+    suite.add_argument("--jobs", type=int, default=1)
+    suite.add_argument("--gpus")
+    _add_common(suite, run=True)
+    suite.set_defaults(handler=_cmd_suite)
 
-    suite_parser = subparsers.add_parser("suite", help="Preview or execute all matching configurations.")
-    suite_parser.add_argument("--env", dest="env_id", choices=["icu_sepsis", "epicare"], required=True)
-    suite_parser.add_argument("--mode", choices=["online", "offline"], required=True)
-    suite_parser.add_argument("--tier", choices=["dev", "final"], default="dev")
-    suite_parser.add_argument("--algorithm", help="Limit the suite to one algorithm family.")
-    suite_parser.add_argument("--execute", action="store_true", help="Start jobs; otherwise only print the plan.")
-    suite_parser.add_argument("--force", action="store_true", help="Re-run completed output directories.")
-    suite_parser.set_defaults(handler=_cmd_suite)
+    status = subparsers.add_parser("status", help="Show clean-layout run status.")
+    status.add_argument("run", nargs="?")
+    status.add_argument("--limit", type=int, default=20)
+    status.set_defaults(handler=_cmd_status)
 
-    baseline_parser = subparsers.add_parser("baselines", help="Directly evaluate an environment's declared reference policies.")
-    _add_selector_arguments(baseline_parser, include_algorithm=False)
-    baseline_parser.add_argument("--episodes", type=int, default=1000)
-    baseline_parser.add_argument("--output-dir", default="runs/baselines")
-    baseline_parser.add_argument("--policies", nargs="+", default=["random", "smart", "soc", "oracle"])
-    baseline_parser.set_defaults(handler=_cmd_baselines)
+    inspect = subparsers.add_parser("inspect", help="Inspect a named dataset or clean-layout run.")
+    inspect_sub = inspect.add_subparsers(dest="inspect_command", required=True)
+    inspect_dataset = inspect_sub.add_parser("dataset")
+    inspect_dataset.add_argument("dataset_id")
+    inspect_dataset.set_defaults(handler=_cmd_inspect_dataset)
+    inspect_run = inspect_sub.add_parser("run")
+    inspect_run.add_argument("run")
+    inspect_run.set_defaults(handler=_cmd_inspect_run)
 
-    inspect_dataset_parser = subparsers.add_parser("inspect-dataset", help="Summarize an NPZ schema, provenance, and OPE preconditions.")
-    inspect_dataset_parser.add_argument("path")
-    inspect_dataset_parser.add_argument("--full-metadata", action="store_true", help="Append the unabridged metadata.json payload.")
-    inspect_dataset_parser.set_defaults(handler=_cmd_inspect_dataset)
+    evaluate = subparsers.add_parser("evaluate", help="Run fresh simulator evaluation for a completed checkpoint.")
+    evaluate.add_argument("run")
+    evaluate.add_argument("--episodes", type=int)
+    evaluate.add_argument("--seed-base", type=int)
+    evaluate.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    evaluate.add_argument("--no-progress", action="store_true")
+    evaluate.set_defaults(handler=_cmd_evaluate)
+    ope = subparsers.add_parser("ope", help="Recompute OPE from a run's held-out logged trajectories.")
+    ope.add_argument("run")
+    ope.add_argument("--bootstrap", type=int, default=200)
+    ope.add_argument("--target-mode", choices=["deployed", "stochastic"], default="deployed")
+    ope.add_argument("--write-canonical", action="store_true", help="Replace the run-level OPE summary when evaluating the deployed target policy.")
+    ope.add_argument("--no-progress", action="store_true")
+    ope.set_defaults(handler=_cmd_ope)
+    report = subparsers.add_parser("report", help="Write an environment-agnostic report for one run.")
+    report.add_argument("run")
+    report.set_defaults(handler=_cmd_report)
+    baselines = subparsers.add_parser("baselines", help="Evaluate declared environment reference policies.")
+    baselines.add_argument("dataset_id")
+    baselines.add_argument("--episodes", type=int, default=1000)
+    baselines.add_argument("--policies", nargs="+")
+    baselines.add_argument("--no-progress", action="store_true")
+    baselines.set_defaults(handler=_cmd_baselines)
 
-    inspect_run_parser = subparsers.add_parser("inspect-run", help="Summarize training, direct evaluation, OPE, and run artifacts.")
-    inspect_run_parser.add_argument("path")
-    inspect_run_parser.add_argument("--raw", action="store_true", help="Print the original JSON artifacts instead of the compact report.")
-    inspect_run_parser.set_defaults(handler=_cmd_inspect_run)
-    return parser.parse_args()
+    research = subparsers.add_parser("research", help="Advanced sweeps, matrices, tuning, collection, and reevaluation.")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    sweep = research_sub.add_parser("sweep", help="Run a method across explicit seeds.")
+    sweep.add_argument("dataset_id")
+    sweep.add_argument("method_id")
+    sweep.add_argument("--mode", choices=["offline", "online"], default="offline")
+    sweep.add_argument("--seeds", default="0,1,2")
+    sweep.add_argument("--execute", action="store_true")
+    sweep.add_argument("--jobs", type=int, default=1)
+    sweep.add_argument("--gpus")
+    _add_common(sweep, run=True)
+    sweep.set_defaults(handler=_cmd_research_sweep)
+    matrix = research_sub.add_parser("matrix", help="Run a declarative dataset-method matrix.")
+    matrix.add_argument("definition", help="Path under configs/research or an absolute JSON path.")
+    matrix.add_argument("--execute", action="store_true")
+    matrix.add_argument("--jobs", type=int, default=1)
+    matrix.add_argument("--gpus")
+    matrix.add_argument("--mode", choices=["offline", "online"], default="offline")
+    _add_common(matrix, run=True)
+    matrix.set_defaults(handler=_cmd_research_matrix)
+    tune = research_sub.add_parser("tune", help="Run Optuna on one named offline recipe.")
+    tune.add_argument("dataset_id")
+    tune.add_argument("method_id")
+    tune.add_argument("--mode", choices=["offline"], default="offline")
+    tune.add_argument("--trials", type=int, default=20)
+    _add_common(tune, run=True)
+    tune.set_defaults(handler=_cmd_research_tune)
+    collect = research_sub.add_parser("collect", help="Collect clean-layout runs into a CSV index.")
+    collect.set_defaults(handler=_cmd_research_collect)
+    summarize = research_sub.add_parser("summarize", help="Aggregate the v0 pilot by task, method, seed, and track.")
+    summarize.add_argument("--output-dir", help="Optional report directory (defaults to artifacts/reports/v0_pilot).")
+    summarize.set_defaults(handler=_cmd_research_summarize)
+    reevaluate = research_sub.add_parser("reevaluate", help="Run fresh evaluation for one or more completed runs.")
+    reevaluate.add_argument("runs", nargs="+")
+    reevaluate.add_argument("--episodes", type=int)
+    reevaluate.add_argument("--seed-base", type=int)
+    reevaluate.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    reevaluate.add_argument("--no-progress", action="store_true")
+    reevaluate.set_defaults(handler=_cmd_research_reevaluate)
+
+    validate = subparsers.add_parser("validate", help="Validate catalog and optionally smoke-test each environment.")
+    validate.add_argument("--smoke", action="store_true")
+    validate.set_defaults(handler=_cmd_validate)
+    return parser.parse_args(_normalize_global_flags(sys.argv[1:]))
 
 
 def main() -> int:
     args = _parse_args()
     try:
         return int(args.handler(args))
-    except (FileNotFoundError, IndexError, KeyError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (CatalogError, FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
+        _console(args).error(str(exc))
         return 2
 
 

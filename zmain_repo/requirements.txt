@@ -1,15 +1,2 @@
--e ./third_party/icu-sepsis/packages/icu_sepsis
--e ./third_party/icu-sepsis/packages/icu_sepsis_helpers
-gym==0.26.2
-gymnasium==0.28.1
-numpy
-pandas
-matplotlib
-tensorboard==2.18.0
-torch
-optuna
-scipy
-tqdm
-pyyaml
-scikit-learn
-pytest
+# Install the reproducible v0 environment from the checked-in lock file.
+-r requirements-lock.txt

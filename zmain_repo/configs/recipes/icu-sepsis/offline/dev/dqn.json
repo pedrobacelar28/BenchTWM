@@ -1,0 +1,57 @@
+{
+  "algo": "dqn",
+  "batch_size": [
+    64
+  ],
+  "buffer_size": [
+    10000
+  ],
+  "control_mode": "fitted_dqn",
+  "dataset_path": "artifacts/datasets/dev/expert/100000/train.npz",
+  "early_stopping_min_delta": 0.0,
+  "early_stopping_patience": 20,
+  "end_e": [
+    0.001
+  ],
+  "env_id": "icu_sepsis",
+  "env_kwargs": {},
+  "environment_seed": 1,
+  "eval_episodes": 500,
+  "eval_seed_base": 100000,
+  "exploration_fraction": [
+    0.25
+  ],
+  "gamma": 1.0,
+  "learning_rate": [
+    0.001
+  ],
+  "learning_starts": 10000,
+  "obs_backend": "state_vector",
+  "offline_batch_size": 256,
+  "offline_eval_episodes": 500,
+  "offline_eval_interval": 0,
+  "offline_eval_during_training": false,
+  "offline_log_interval": 250,
+  "offline_train_steps": 5000,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "schema_version": 1,
+  "seed": [
+    0
+  ],
+  "start_e": [
+    1.0
+  ],
+  "success_threshold": 0.82,
+  "target_network_frequency": [
+    512
+  ],
+  "tau": [
+    0.01
+  ],
+  "track": false,
+  "train_frequency": 10,
+  "train_mode": "offline",
+  "use_tensorboard": false,
+  "val_dataset_path": "artifacts/datasets/dev/expert/100000/val.npz"
+}

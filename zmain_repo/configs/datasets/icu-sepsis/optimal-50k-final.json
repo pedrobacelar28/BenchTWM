@@ -1,0 +1,15 @@
+{
+  "behavior_policy": "optimal",
+  "dataset_name": "icu_sepsis_optimal_final_50000",
+  "env_id": "icu_sepsis",
+  "env_kwargs": {},
+  "environment_seed": 1,
+  "gamma": 1.0,
+  "num_train_episodes": 50000,
+  "num_val_episodes": 5000,
+  "optimal_value_iteration_delta": 1e-06,
+  "optimal_value_iteration_steps": 50000,
+  "overwrite": false,
+  "schema_version": 1,
+  "seed": 0
+}

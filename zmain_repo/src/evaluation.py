@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
+from src.utils.progress import tqdm
 
 from src.envs.factory import make_env
 from src.utils.io import ensure_dir, save_json
@@ -42,13 +42,17 @@ def evaluate_policy(
     method = method_id(config)
     trajectories: list[dict] = []
     episodes: list[dict] = []
+    action_latencies: list[float] = []
+    planner_calls = 0
+    planner_model_evaluations = 0
+    invalid_action_count = 0
     episode_iter = tqdm(
         range(num_episodes),
         desc=progress_desc or f"eval:{checkpoint_name}",
         unit="ep",
         dynamic_ncols=True,
         leave=False,
-        disable=not show_progress or not sys.stderr.isatty(),
+        disable=not show_progress,
     )
     for episode_id in episode_iter:
         if hasattr(policy, "reset_episode"):
@@ -60,7 +64,23 @@ def evaluate_policy(
         actions: list[int] = []
         metric_series = [env.transition_metrics(info)]
         while not done:
+            action_started = time.perf_counter()
             action = int(policy.act(obs, info, deterministic=deterministic))
+            action_latencies.append(time.perf_counter() - action_started)
+            planner = getattr(policy, "planner", None)
+            if planner is not None:
+                planner_calls += 1
+                planner_model_evaluations += int(
+                    getattr(planner, "samples", 0)
+                    * getattr(planner, "iterations", 0)
+                    * getattr(planner, "horizon", 0)
+                )
+            if action not in set(int(item) for item in info.get("admissible_actions", [])):
+                invalid_action_count += 1
+                raise ValueError(
+                    f"Policy {method!r} emitted inadmissible action {action}; "
+                    f"admissible={info.get('admissible_actions', [])}"
+                )
             current_metrics = env.transition_metrics(info)
             next_obs, reward, terminated, truncated, next_info = env.step(action)
             if hasattr(policy, "observe"):
@@ -162,6 +182,11 @@ def evaluate_policy(
         "mean_length": float(episodes_df["length"].mean()) if not episodes_df.empty else 0.0,
         "mean_action_stability_l1": float(episodes_df["action_stability_l1"].mean()) if not episodes_df.empty else 0.0,
         "mean_abrupt_jump_rate": float(episodes_df["abrupt_jump_rate"].mean()) if not episodes_df.empty else 0.0,
+        "mean_action_latency_ms": float(np.mean(action_latencies) * 1000.0) if action_latencies else 0.0,
+        "planner_calls": int(planner_calls),
+        "planner_model_evaluations": int(planner_model_evaluations),
+        "invalid_action_count": int(invalid_action_count),
+        "invalid_action_rate": float(invalid_action_count / max(1, len(trajectories))),
         **{f"mean_{name}": _metric_summary(episodes_df, name) for name in env.spec.metric_names},
     }
     if "remission" in episodes_df:

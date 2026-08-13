@@ -1,5 +1,39 @@
 # Benchmarks and Environment Contract
 
+## BenchTWM v0 Protocol
+
+The reproducible v0 pilot is an **offline** benchmark of continuous structured
+observations and categorical actions. A task is identified by:
+
+```text
+task = dataset + environment + observation_backend + action_type + train_mode
+```
+
+The public tasks are:
+
+```text
+epicare/smart/dev|obs=state_vector|action=discrete|mode=offline
+icu-sepsis/mixed/dev|obs=state_vector|action=discrete|mode=offline
+```
+
+`state_vector` is a `float32` vector whose feature names and source dimension
+are recorded in `metadata.json`. `state_id` remains in every transition for
+trajectory reconstruction and diagnostics, but is not a leaderboard input.
+Actions remain `int64` categorical values and every policy must respect the
+admissible-action mask. Continuous actions are deferred to a future schema.
+
+The public tracks are `direct_rl` (BC, fitted/offline DQN, IQL, CQL),
+`provisional_planning` (the current raw, latent, and reconstructive model + CEM
+placeholders), and the reserved `published_planning` track. Each method uses
+seeds `0, 1, 2`, batch 256, 5,000 optimization steps (1,280,000 sampled
+transitions), validation every 250 steps, and a final 500-episode evaluation.
+EpiCare additionally has held-out OPE; ICU is evaluated directly in the
+simulator. Intermediate simulator evaluation is disabled.
+
+The question is whether planning's return/success improvement compensates for
+its training, inference, and planner-call cost relative to the best direct
+baseline on the same task. ICU-Sepsis and EpiCare are never averaged together.
+
 ## Source Material and Scope
 
 This suite vendors only the runtime cores needed to execute the two benchmarks.
@@ -86,3 +120,9 @@ EpiCare success is remission. SOFA and symptom burden have distinct scales, and
 raw action distance has different ranges across the grid and categorical action
 spaces. Reports must preserve `env_id` and compare clinical outcomes within an
 environment unless a justified normalization is defined.
+
+The v0 report writes one row per task/method/seed and then summarizes mean and
+standard deviation within that task. Planning gains are
+`planning_return - best_direct_return` and
+`planning_success - best_direct_success`; OPE, direct evaluation, and planner
+cost remain separate evidence streams.

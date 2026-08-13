@@ -1,0 +1,54 @@
+{
+  "algo": "dqn",
+  "batch_size": [
+    256
+  ],
+  "buffer_size": [
+    100000
+  ],
+  "control_mode": "epsilon_greedy",
+  "end_e": [
+    0.01
+  ],
+  "env_id": "epicare",
+  "env_kwargs": {
+    "patient_modifiers": true
+  },
+  "environment_seed": 1,
+  "eval_episodes": 10000,
+  "eval_seed_base": 100000,
+  "exploration_fraction": [
+    0.25
+  ],
+  "gamma": 1.0,
+  "learning_rate": [
+    0.001
+  ],
+  "learning_starts": 10000,
+  "max_episodes": 100000,
+  "obs_backend": "state_vector",
+  "policy_architecture": "mlp",
+  "policy_hidden_dim": [
+    128
+  ],
+  "policy_hidden_layers": 2,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "schema_version": 1,
+  "seed": [
+    0
+  ],
+  "start_e": [
+    1.0
+  ],
+  "success_threshold": 0.0,
+  "target_network_frequency": [
+    512
+  ],
+  "tau": [
+    0.01
+  ],
+  "track": false,
+  "train_frequency": 10,
+  "use_tensorboard": false
+}

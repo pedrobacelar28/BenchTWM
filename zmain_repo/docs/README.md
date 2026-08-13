@@ -2,8 +2,8 @@
 
 The documentation is organized around the lifecycle of a benchmark experiment.
 
-1. [Operations](operations.md): installation, the `bench.py` CLI, legacy
-   commands, config discovery, and output inspection.
+1. [Operations](operations.md): the offline-first `bench.py` lifecycle,
+   queues, output inspection, and evidence boundaries.
 2. [Benchmarks](benchmarks.md): ICU-Sepsis and EpiCare, their source material,
    observation/action spaces, and the adapter contract.
 3. [Data schema](data-schema.md): upstream data formats, normalized local NPZ
@@ -14,7 +14,9 @@ The documentation is organized around the lifecycle of a benchmark experiment.
    artifacts, and interpretation limits.
 6. [Extending the suite](extending.md): the exact contracts for a new
    environment or algorithm.
-7. [Technical specification](paper/main.tex): a self-contained LaTex document
+7. [Recipes and research](recipes.md): catalog IDs, versioned recipes, sweeps,
+   matrices, and tuning.
+8. [Technical specification](paper/main.tex): a self-contained LaTex document
    written in paper form, without empirical results.
 
 The descriptions distinguish three things throughout:

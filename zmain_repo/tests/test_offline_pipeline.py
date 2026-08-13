@@ -2,14 +2,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from src.offline.dataset import REQUIRED_ARRAYS, OfflineTransitionDataset
 from src.offline.generate_dataset import generate_dataset
-from src.offline.trainers import get_offline_trainer
+from src.offline.trainers import _training_batches, get_offline_trainer
+from src.operations.artifacts import initial_manifest
 from src.run_experiment import run_experiment
-from analysis.utils import aggregate_metric_dict, load_run_metrics, save_processed
 
 
 def _dataset_config(output_dir: Path, policy: str = "random_admissible", seed: int = 5) -> dict:
@@ -214,6 +216,24 @@ class TestOfflinePipeline(unittest.TestCase):
             self.assertEqual(summary["num_validation_checks"], 2)
             self.assertEqual(len(result["metrics"]["returns"]), 1)
 
+    def test_early_exit_closes_offline_progress_before_final_evaluation(self):
+        args = SimpleNamespace(
+            offline_train_steps=2,
+            offline_batch_size=4,
+            offline_log_interval=1,
+            offline_eval_interval=1,
+            show_progress=True,
+        )
+        dataset = Mock()
+        dataset.sample.return_value = object()
+        bar = Mock()
+        bar.__iter__ = Mock(return_value=iter([1, 2]))
+        with patch("src.offline.trainers.tqdm", return_value=bar):
+            batches = _training_batches(args, dataset, device="cpu", desc="test")
+            next(batches)
+            batches.close()
+        bar.close.assert_called_once()
+
     def test_color_wm_rollout_metrics_are_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds_dir = Path(tmp) / "ds"
@@ -241,8 +261,15 @@ class TestOfflinePipeline(unittest.TestCase):
             generate_dataset(_dataset_config(ds_dir))
             config = _tiny_offline_config(ds_dir, "dqn")
             config["save_trajectories"] = True
-            run_dir = run_experiment(config, force_run=True)
-            self.assertIn("dqn_offline", str(run_dir))
+            run_dir = Path(tmp) / "run"
+            manifest = initial_manifest(
+                {**config, "env_id": "icu_sepsis"},
+                dataset_id="test/icu",
+                method_id="dqn",
+                run_dir=run_dir,
+            )
+            run_dir = run_experiment(config, force_run=True, output_dir=run_dir, manifest=manifest, quiet=True)
+            self.assertEqual(run_dir.name, "run")
             self.assertTrue((run_dir / "metrics.pkl").exists())
             self.assertTrue((run_dir / "offline_training_history.csv").exists())
             self.assertTrue((run_dir / "offline_eval_history.csv").exists())
@@ -254,10 +281,8 @@ class TestOfflinePipeline(unittest.TestCase):
             self.assertTrue((run_dir / "checkpoint_best.pt").exists())
             self.assertTrue((run_dir / "episodes_summary.csv").exists())
             self.assertTrue((run_dir / "trajectories.csv").exists())
-            processed = aggregate_metric_dict([load_run_metrics(config)])
-            processed_path = save_processed(processed, config)
-            self.assertTrue(processed_path.exists())
-            self.assertIn("returns", processed)
+            with (run_dir / "run_manifest.json").open(encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["status"], "completed")
 
 
 if __name__ == "__main__":

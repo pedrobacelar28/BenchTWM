@@ -5,12 +5,12 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 
-datasets/offline/
-results/
 runs/
+datasets/
 reports/
 plots/
 processed/
+artifacts/
 
 *.sqlite3
 *.pt

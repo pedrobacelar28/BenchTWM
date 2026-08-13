@@ -1,0 +1,50 @@
+{
+  "action_embed_dim": [
+    32
+  ],
+  "algo": "raw_model",
+  "batch_size": [
+    256
+  ],
+  "cem_alpha": 0.2,
+  "cem_elites": 16,
+  "cem_horizon": 8,
+  "cem_iterations": 4,
+  "cem_samples": 128,
+  "continue_loss_weight": 1.0,
+  "control_mode": "mpc_cem",
+  "dynamics_loss_weight": [
+    1.0
+  ],
+  "env_id": "epicare",
+  "env_kwargs": {
+    "patient_modifiers": true
+  },
+  "environment_seed": 1,
+  "eval_episodes": 1000,
+  "eval_seed_base": 100000,
+  "gamma": 1.0,
+  "hidden_dim": [
+    256
+  ],
+  "learning_rate": [
+    0.001
+  ],
+  "max_episodes": 200000,
+  "obs_backend": "state_vector",
+  "replay_size": [
+    100000
+  ],
+  "reward_loss_weight": 1.0,
+  "save_checkpoints": true,
+  "save_trajectories": true,
+  "schema_version": 1,
+  "seed": [
+    0
+  ],
+  "success_threshold": 0.0,
+  "track": false,
+  "updates_per_step": 4,
+  "use_tensorboard": false,
+  "warmup_steps": 5000
+}

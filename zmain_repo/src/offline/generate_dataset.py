@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import math
-import sys
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from tqdm.auto import trange
-
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+from src.utils.progress import trange
 
 from src.algorithms.registry import get_policy_loader
 from src.bootstrap import bootstrap_icu_helpers
@@ -253,7 +250,12 @@ def _collect_split(
     metric_names = env.spec.metric_names
     buffers = _empty_buffers(metric_names)
     summaries: list[dict] = []
-    for local_episode in trange(num_episodes, desc=f"collect_{seed_offset}", dynamic_ncols=True):
+    for local_episode in trange(
+        num_episodes,
+        desc=f"collect_{seed_offset}",
+        dynamic_ncols=True,
+        disable=not bool(config.get("show_progress", True)),
+    ):
         episode_id = start_episode_id + local_episode
         obs, info = env.reset(seed=int(config["seed"]) + seed_offset + local_episode)
         episode_policy = behavior.choose_episode_policy()
@@ -387,10 +389,14 @@ def generate_dataset(config: dict) -> dict:
     metadata_path = output_dir / "metadata.json"
     episodes_path = output_dir / "episodes_summary.csv"
     if train_path.exists() and val_path.exists() and metadata_path.exists() and not bool(config.get("overwrite", False)):
-        print(f"Dataset already exists: {output_dir}")
+        if not bool(config.get("quiet", False)):
+            print(f"Dataset already exists: {output_dir}")
         return load_json(metadata_path)
 
     env_id = environment_id(config)
+    # Canonical catalog recipes set state_vector explicitly.  Keep the legacy
+    # ICU default discrete_id for callers that construct a minimal config and
+    # rely on the compatibility schema.
     obs_backend = str(config.get("obs_backend", "state_vector" if env_id == "epicare" else "discrete_id"))
     env = make_env(config, obs_backend=obs_backend, seed=int(config["seed"]))
     behavior = _make_behavior(config, env)
@@ -440,6 +446,20 @@ def generate_dataset(config: dict) -> dict:
         "config": config,
         "schema_version": 2,
         "environment": env.spec.to_dict(),
+        "observation": {
+            "backend": obs_backend,
+            "dtype": "float32",
+            "dim": int(env.spec.obs_dim),
+            "state_vector_dim": int(env.spec.state_vector_dim),
+            "feature_names": list(env.spec.feature_names),
+            "source": "environment.state_vector" if obs_backend == "state_vector" else "environment.state_id_one_hot",
+        },
+        "action": {
+            "type": "discrete",
+            "dtype": "int64",
+            "num_actions": int(env.spec.num_actions),
+            "mask_field": "action_masks",
+        },
         "policy_ids": POLICY_IDS,
         "train": {**train_meta, **_summary_stats(train_summaries)},
         "validation": {**val_meta, **_summary_stats(val_summaries)},
@@ -447,13 +467,6 @@ def generate_dataset(config: dict) -> dict:
         "episodes_summary_path": str(episodes_path),
     }
     save_json(metadata, metadata_path)
-    print(f"Saved dataset under {output_dir}")
+    if not bool(config.get("quiet", False)):
+        print(f"Saved dataset under {output_dir}")
     return metadata
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python src/offline/generate_dataset.py <dataset_config.json>")
-        raise SystemExit(1)
-    cfg = load_json(sys.argv[1])
-    generate_dataset(cfg)

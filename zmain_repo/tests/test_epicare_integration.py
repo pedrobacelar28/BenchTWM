@@ -1,5 +1,4 @@
 import json
-import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,12 +6,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from analysis.report_run import generate_report
+from src.operations.reporting import build_run_report
 from src.algorithms.registry import get_trainer
 from src.envs.factory import make_env
+from src.envs.reference import make_reference_policy
 from src.offline.dataset import REQUIRED_ARRAYS
 from src.offline.generate_dataset import generate_dataset
-from src.offline.ope import evaluate_ope
+from src.offline.ope import _estimate, evaluate_ope
 from src.offline.trainers import get_offline_trainer
 
 
@@ -137,6 +137,45 @@ class TestEpiCareIntegration(unittest.TestCase):
             pd.testing.assert_frame_equal(bootstrap_a, bootstrap_b)
             self.assertEqual(set(summary_a["estimators"]), {"IS", "WIS", "PDIS", "WPDIS"})
 
+    def test_wpdis_matches_on_policy_return_for_variable_length_epicare_trajectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generate_dataset(_dataset_config(root))
+            data = np.load(root / "ope_test.npz")
+            logged_returns = [
+                float(data["rewards"][data["episode_ids"] == episode_id].sum())
+                for episode_id in np.unique(data["episode_ids"])
+            ]
+            config = {"env_id": "epicare", "environment_seed": 1, "obs_backend": "state_vector"}
+            env = make_env(config)
+            try:
+                smart = make_reference_policy(env, "smart", seed=0)
+                summary, _ = evaluate_ope(
+                    smart,
+                    dataset_path=root / "ope_test.npz",
+                    obs_backend="state_vector",
+                    bootstrap_replicates=2,
+                    seed=0,
+                    deterministic=False,
+                )
+            finally:
+                env.close()
+            for estimator in summary["estimators"].values():
+                self.assertAlmostEqual(estimator["estimate"], float(np.mean(logged_returns)), places=4)
+            self.assertEqual(summary["reliability"]["status"], "limited")
+            self.assertGreater(summary["reliability"]["trajectory_ess_fraction"], 0.99)
+            self.assertEqual(summary["policy_probability_contract"]["status"], "exact")
+
+    def test_wpdis_pads_terminated_trajectories_with_zero_reward(self):
+        estimates, _ = _estimate(
+            [
+                {"rewards": np.asarray([1.0, 2.0]), "ratios": np.asarray([1.0, 1.0])},
+                {"rewards": np.asarray([3.0]), "ratios": np.asarray([1.0])},
+            ],
+            gamma=1.0,
+        )
+        self.assertEqual(estimates, {"IS": 3.0, "WIS": 3.0, "PDIS": 3.0, "WPDIS": 3.0})
+
     def test_all_offline_algorithms_smoke(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
@@ -159,21 +198,17 @@ class TestEpiCareIntegration(unittest.TestCase):
     def test_generic_report_for_epicare_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            output_dir = root / "output"
-            output_dir.mkdir()
-            (output_dir / "config.json").write_text(json.dumps({"env_id": "epicare", "obs_backend": "state_vector", "seed": 0}), encoding="utf-8")
-            with (output_dir / "metrics.pkl").open("wb") as handle:
-                pickle.dump({}, handle)
-            pd.DataFrame({"step": [1], "loss": [1.0]}).to_csv(output_dir / "offline_training_history.csv", index=False)
-            pd.DataFrame({"step": [1], "eval_mean_return": [1.0]}).to_csv(output_dir / "offline_eval_history.csv", index=False)
-            pd.DataFrame({"episode_id": [0], "return": [1.0], "success": [True], "length": [1], "action_stability_l1": [0.0], "abrupt_jump_rate": [0.0], "mean_symptom_burden": [0.4]}).to_csv(output_dir / "episodes_summary.csv", index=False)
-            pd.DataFrame({"episode_id": [0], "t": [0], "action_idx": [0], "action_label": ["Treatment 0"], "reward": [1.0], "success": [True], "metric_symptom_burden": [0.4]}).to_csv(output_dir / "trajectories.csv", index=False)
-            (output_dir / "environment_spec.json").write_text(json.dumps({"env_id": "epicare", "metric_names": ["symptom_burden"], "action_geometry": {"type": "categorical"}}), encoding="utf-8")
-            run_dir = root / "run"
-            run_dir.mkdir()
-            (run_dir / "manifest.json").write_text(json.dumps([{"dataset_tag": "tiny", "algorithm": "dqn", "method_id": "dqn_offline", "output_dir": str(output_dir), "resolved_config": {}}]), encoding="utf-8")
-            report_dir = generate_report(run_dir, root / "report", ["png"])
-            self.assertTrue((report_dir / "tables" / "generic_run_summary.csv").exists())
+            run_dir = root / "artifacts" / "runs" / "epicare" / "smart" / "dev" / "offline" / "dqn" / "seed-0--test"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run_manifest.json").write_text(json.dumps({"run_id": "epicare:smart:dqn", "status": "completed", "dataset_id": "epicare/smart/dev", "method_id": "dqn", "environment": "epicare", "seed": 0}), encoding="utf-8")
+            (run_dir / "metrics_summary.json").write_text(json.dumps({"train_summary": {"best_validation_loss": 0.1}}), encoding="utf-8")
+            (run_dir / "eval_summary.json").write_text(json.dumps({"mean_return": 1.0, "mean_remission_rate": 0.5}), encoding="utf-8")
+            (run_dir / "ope_summary.json").write_text(json.dumps({"estimators": {"WIS": {"estimate": 0.2}}, "diagnostics": {"trajectory_ess": 4.0}}), encoding="utf-8")
+            report_dir, summary = build_run_report(run_dir, root=root / "reports")
+            self.assertTrue((report_dir / "summary.json").exists())
+            self.assertIn("optimization", summary)
+            self.assertIn("direct_evaluation", summary)
+            self.assertIn("ope", summary)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mode": "offline",
+  "datasets": ["icu-sepsis/mixed/dev"],
+  "methods": ["bc", "dqn", "iql", "cql", "raw-model/continuous-cem", "latent-model/continuous-cem", "reconstructive-model/continuous-cem"],
+  "seeds": [0, 1, 2]
+}

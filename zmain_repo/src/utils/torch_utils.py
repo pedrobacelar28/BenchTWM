@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 
 def get_torch_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested = os.environ.get("BENCH_DEVICE", "auto").strip().lower()
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cpu":
+        return torch.device("cpu")
+    if requested in {"cuda", "gpu"}:
+        if not torch.cuda.is_available():
+            raise RuntimeError("BENCH_DEVICE requests CUDA but torch.cuda.is_available() is false")
+        return torch.device("cuda")
+    raise ValueError("BENCH_DEVICE must be one of auto, cpu, cuda, or gpu")
 
 
 def as_device_string(device: torch.device | str) -> str:

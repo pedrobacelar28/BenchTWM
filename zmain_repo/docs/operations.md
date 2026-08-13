@@ -1,108 +1,82 @@
-# Operations and Reproducibility
+# Operations
 
-Run every command from `zmain_repo/`. The standard dependency set is in
-`requirements.txt`; benchmark cores are vendored in `third_party/`.
-
-## Canonical CLI
-
-`scripts/bench.py` is a thin operational layer over the existing Python
-functions. It does not create a second experiment format and does not replace
-legacy scripts.
+Run all commands from the BenchTWM repository root with:
 
 ```bash
-# List configs discovered from experiments/**/*.json.
-python scripts/bench.py list
-python scripts/bench.py list --env epicare --kind offline --tier dev
-
-# Generate a dataset. --config avoids ambiguous catalog matches.
-python scripts/bench.py dataset \
-  --config experiments/datasets/dev/epicare_smart.json
-
-# Run one resolved element of a JSON parameter sweep.
-python scripts/bench.py run \
-  --config experiments/offline/dev/epicare_dqn.json --index 0
-
-# Preview every matching config. Nothing starts without --execute.
-python scripts/bench.py suite --env epicare --mode offline --tier dev
-python scripts/bench.py suite --env epicare --mode offline --tier dev --execute
-
-# Evaluate declared environment baselines (SMART, SoC, random, oracle for EpiCare).
-python scripts/bench.py baselines \
-  --config experiments/datasets/dev/epicare_smart.json --episodes 100
-
-# Examine serialized artifacts without opening Python.
-python scripts/bench.py inspect-dataset datasets/offline/epicare/dev/smart/1000/train.npz
-python scripts/bench.py inspect-run results/dqn_offline/<run-hash>
+python scripts/bench.py <command>
 ```
 
-The catalog filters mean:
+`doctor` is the first diagnostic command. It reports Python packages, CUDA,
+visible GPUs, the artifact root, and the vendored ICU-Sepsis and EpiCare cores.
 
-| Filter | Meaning |
-|---|---|
-| `--env` | `icu_sepsis` or `epicare` |
-| `--kind` | `datasets`, `online`, or `offline` |
-| `--tier` | `dev` or `final` |
-| `--algorithm` | Algorithm family such as `dqn` or `raw_model` |
-| `--name` | Config stem or relative config path without `.json` |
-
-## Compatible Legacy Commands
-
-The following remain stable and are useful for automation already built around
-them:
+## Offline Lifecycle
 
 ```bash
-python src/offline/generate_dataset.py experiments/datasets/dev/epicare_smart.json
-python src/run_config.py experiments/offline/dev/epicare_dqn.json 0
-python scripts/run_sweep.py -j experiments/offline/dev/epicare_dqn.json
-python scripts/evaluate_baselines.py experiments/datasets/dev/epicare_smart.json --episodes 100
-PYTHONPATH=. python -m unittest discover -s tests -v
+python scripts/bench.py catalog
+python scripts/bench.py dataset show epicare/smart/dev
+python scripts/bench.py dataset build epicare/smart/dev
+python scripts/bench.py train epicare/smart/dev dqn --dry-run
+python scripts/bench.py train epicare/smart/dev dqn
+python scripts/bench.py status
 ```
 
-`scripts/run_offline_matrix.py` and the Optuna helpers are retained historical
-automation. They are useful for their intended ICU matrices, but are not the
-recommended starting point for a new multi-environment experiment.
+`train` checks that `train.npz`, `val.npz`, and, when requested, `ope_test.npz`
+exist before it starts. Dataset generation is always explicit.
 
-## Run Lifecycle
+For offline recipes, the initial plan states the early-stopping monitor,
+direction, validation cadence, patience, and checkpoint rule. The terminal then
+labels optimization, final direct evaluation, and held-out OPE as distinct
+phases. OPE shows separate ratio-construction and bootstrap progress bars.
 
-1. Generate a dataset configuration. This creates `train.npz`, `val.npz`, and
-   optionally `ope_test.npz` plus `metadata.json`.
-2. Run an online or offline configuration. The runner resolves sweep values,
-   trains, saves checkpoints, runs final simulator evaluation, and optionally
-   runs OPE.
-3. Inspect `metrics_summary.json` first. It links training summaries, direct
-   evaluation, and method-specific losses in one readable file.
-4. Use `episodes_summary.csv` and `trajectories.csv` for analysis. They carry
-   `environment_spec.json`, so readers can recover action labels and metrics.
+Use `--set KEY=JSON_VALUE` for an ephemeral typed override. It never mutates a
+recipe file:
 
-## Output Contract
+```bash
+python scripts/bench.py train epicare/smart/dev dqn \
+  --set offline_train_steps=2000 --set policy_hidden_dim=64 --dry-run
+```
 
-Each run is stored at `results/<method_id>/<signature>/`. The signature is a
-hash of the resolved configuration, which prevents accidental overwrite and
-makes equivalent experiments idempotent.
+Use `--mode online` only for deliberate simulator baselines. Offline is the
+default and is the recommended benchmark workflow.
 
-| Artifact | Meaning |
-|---|---|
-| `config.json` | Fully resolved experiment parameters |
-| `environment_spec.json` | Action labels, features, metrics, backend, and geometry |
-| `metrics.pkl` | Full machine-readable trainer payload |
-| `metrics_summary.json/csv` | Human-readable flattened summaries |
-| `training_history.csv` | Episode-level online history or periodic offline-evaluation history |
-| `offline_training_history.csv` | Dataset-only optimization and validation losses |
-| `offline_eval_history.csv` | Periodic direct simulator evaluation during offline training |
-| `checkpoint_last.pt`, `checkpoint_best.pt` | Last and validation-selected model states |
-| `episodes_summary.csv`, `trajectories.csv` | Final direct simulator evaluation |
-| `ope_summary.json`, `ope_bootstrap.csv` | Held-out OPE results, when enabled |
+## Suites and Local Queues
 
-The best offline checkpoint is selected by validation loss. OPE is post-training
-diagnostic output and never selects a checkpoint.
+`suite` only prints its plan unless `--execute` is present:
 
-## Reproducibility Controls
+```bash
+python scripts/bench.py suite epicare/smart/dev --method dqn --method raw-model
+python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --execute
+python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --gpus 0,1 --execute
+```
 
-`seed` controls agent initialization, sampling, and episode seeds. EpiCare also
-uses `environment_seed`: it fixes the generated POMDP while `reset(seed=...)`
-reproduces an episode inside that POMDP. ICU-Sepsis remains deterministic with
-respect to its packaged MDP parameters and Gymnasium episode seed.
+Each worker receives an isolated resolved config, log file, manifest, and
+device assignment. A completed run is skipped on a later queue invocation
+unless `--force` is supplied. Queue manifests are under `artifacts/queues/`.
 
-Use `dev` configs for smoke testing. Do not infer clinical validity from any
-result; both upstream benchmark papers explicitly position their environments
-as research benchmarks rather than clinical decision tools.
+## Evidence and Artifacts
+
+The command line deliberately labels three different measurement regimes:
+
+1. **Offline optimization** uses fixed `train.npz` and `val.npz` and reports
+   algorithm-specific losses.
+2. **Direct simulator evaluation** uses fresh benchmark episodes and reports
+   return, success, safety, burden, and environment-declared metrics.
+3. **OPE** uses held-out `ope_test.npz`; IS, WIS, PDIS, WPDIS, bootstrap
+   intervals, support, ESS, and extreme-weight diagnostics are reported
+   independently from optimization and simulator evaluation.
+
+```bash
+python scripts/bench.py inspect run <run-id-or-path>
+python scripts/bench.py evaluate <run-id-or-path> --episodes 1000
+python scripts/bench.py ope <run-id-or-path> --bootstrap 500
+python scripts/bench.py report <run-id-or-path>
+```
+
+`ope` uses the deployed policy semantics by default. Its reliability table must
+be checked before treating an estimate as a ranking. `--target-mode stochastic`
+evaluates a different counterfactual stochastic policy, while
+`--write-canonical` replaces the run-level OPE summary after a deployed-mode
+recomputation.
+
+`status`, `catalog`, `inspect`, and the final results of operational commands
+accept `--json` for automation.
