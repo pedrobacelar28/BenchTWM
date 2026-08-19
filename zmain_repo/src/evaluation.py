@@ -13,6 +13,7 @@ from src.envs.factory import make_env
 from src.utils.io import ensure_dir, save_json
 from src.utils.metrics import action_stability
 from src.utils.methods import method_id
+from src.utils.queue_progress import update_progress
 
 
 def _metric_summary(episodes: pd.DataFrame, name: str) -> float:
@@ -53,6 +54,14 @@ def evaluate_policy(
         dynamic_ncols=True,
         leave=False,
         disable=not show_progress,
+    )
+    progress_every = max(1, int(num_episodes) // 20)
+    update_progress(
+        status="running",
+        phase="evaluation",
+        method_id=config.get("method_id"),
+        step=0,
+        total_steps=int(num_episodes),
     )
     for episode_id in episode_iter:
         if hasattr(policy, "reset_episode"):
@@ -172,6 +181,14 @@ def evaluate_policy(
                 row["survived"] = bool(outcome["success"])
         if show_progress:
             episode_iter.set_postfix(ret=f"{total_reward:.3f}", len=step_idx, success=int(outcome["success"]))
+        if episode_id == 0 or (episode_id + 1) % progress_every == 0 or episode_id + 1 == int(num_episodes):
+            update_progress(
+                status="running",
+                phase="evaluation",
+                method_id=config.get("method_id"),
+                step=episode_id + 1,
+                total_steps=int(num_episodes),
+            )
 
     env.close()
     episodes_df = pd.DataFrame(episodes)

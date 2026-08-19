@@ -152,7 +152,7 @@ def _early_stopping_plan(params: dict[str, Any]) -> dict[str, Any]:
         "latent_model": "validation weighted latent-dynamics objective",
         "reconstructive_model": "validation weighted reconstruction-and-dynamics objective",
     }
-    patience = int(params.get("early_stopping_patience", 0))
+    patience = int(params.get("early_stopping_patience", 20))
     return {
         "enabled": patience > 0,
         "monitor": "validation_loss",
@@ -430,12 +430,20 @@ def _cmd_suite(args: argparse.Namespace) -> int:
     missing = [plan for plan in plans if not plan["preflight"]["ready"]]
     if missing:
         raise FileNotFoundError(f"Dataset {args.dataset_id!r} is incomplete. Run dataset build before executing the suite.")
-    queue_dir, manifest = execute_queue(jobs, root=_root(args), max_workers=args.jobs, gpus=args.gpus, resume=not args.force)
+    queue_dir, manifest = execute_queue(
+        jobs,
+        root=_root(args),
+        max_workers=args.jobs,
+        gpus=args.gpus,
+        resume=not args.force,
+        follow=bool(getattr(args, "follow", False) and not args.json),
+    )
     if args.json:
-        console.emit({"queue_dir": str(queue_dir), "manifest": manifest})
+        console.emit({"queue_dir": str(queue_dir), "suite_results": str(queue_dir / "suite_results.json"), "manifest": manifest})
     else:
         console.success(f"Queue completed: {queue_dir}")
         console.table("Queue Jobs", ("name", "status", "log"), [(item["name"], item["status"], item["log_path"]) for item in manifest["jobs"]])
+        console.note(f"Suite results: {queue_dir / 'suite_results.json'}")
     return 0 if not manifest["failures"] else 1
 
 
@@ -715,11 +723,19 @@ def _cmd_research_matrix(args: argparse.Namespace) -> int:
             console.title("Research Matrix Plan", str(definition_path))
             console.table("Jobs", ("name", "output"), [(item["name"], item["output_dir"]) for item in payload["jobs"]])
         return 0
-    queue_dir, manifest = execute_queue(jobs, root=_root(args), max_workers=args.jobs, gpus=args.gpus, resume=not args.force)
+    queue_dir, manifest = execute_queue(
+        jobs,
+        root=_root(args),
+        max_workers=args.jobs,
+        gpus=args.gpus,
+        resume=not args.force,
+        follow=bool(getattr(args, "follow", False) and not args.json),
+    )
     if args.json:
-        console.emit({"queue_dir": str(queue_dir), "manifest": manifest})
+        console.emit({"queue_dir": str(queue_dir), "suite_results": str(queue_dir / "suite_results.json"), "manifest": manifest})
     else:
         console.success(f"Research matrix completed: {queue_dir}")
+        console.note(f"Suite results: {queue_dir / 'suite_results.json'}")
     return 0 if not manifest["failures"] else 1
 
 
@@ -937,6 +953,7 @@ def _parse_args() -> argparse.Namespace:
     suite.add_argument("--execute", action="store_true")
     suite.add_argument("--jobs", type=int, default=1)
     suite.add_argument("--gpus")
+    suite.add_argument("--follow", action="store_true", help="Show live job and optimization progress while the suite runs.")
     _add_common(suite, run=True)
     suite.set_defaults(handler=_cmd_suite)
 
@@ -988,6 +1005,7 @@ def _parse_args() -> argparse.Namespace:
     sweep.add_argument("--execute", action="store_true")
     sweep.add_argument("--jobs", type=int, default=1)
     sweep.add_argument("--gpus")
+    sweep.add_argument("--follow", action="store_true", help="Show live job and optimization progress while the sweep runs.")
     _add_common(sweep, run=True)
     sweep.set_defaults(handler=_cmd_research_sweep)
     matrix = research_sub.add_parser("matrix", help="Run a declarative dataset-method matrix.")
@@ -995,6 +1013,7 @@ def _parse_args() -> argparse.Namespace:
     matrix.add_argument("--execute", action="store_true")
     matrix.add_argument("--jobs", type=int, default=1)
     matrix.add_argument("--gpus")
+    matrix.add_argument("--follow", action="store_true", help="Show live job and optimization progress while the matrix runs.")
     matrix.add_argument("--mode", choices=["offline", "online"], default="offline")
     _add_common(matrix, run=True)
     matrix.set_defaults(handler=_cmd_research_matrix)

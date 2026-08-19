@@ -47,11 +47,18 @@ default and is the recommended benchmark workflow.
 python scripts/bench.py suite epicare/smart/dev --method dqn --method raw-model
 python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --execute
 python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --gpus 0,1 --execute
+python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --gpus 0,1 --follow --execute
 ```
 
 Each worker receives an isolated resolved config, log file, manifest, and
 device assignment. A completed run is skipped on a later queue invocation
-unless `--force` is supplied. Queue manifests are under `artifacts/queues/`.
+unless `--force` is supplied. With `--follow`, the parent process renders one
+live progress row per job without interleaving worker output. Queue manifests
+and the central `suite_results.json` are under `artifacts/queues/<timestamp>/`.
+The central JSON contains every job's identity, resolved config, optimization
+summary, direct evaluation, OPE, timing, and method-level aggregates. The
+individual run directories remain the canonical location for checkpoints and
+per-method histories.
 
 ## Evidence and Artifacts
 

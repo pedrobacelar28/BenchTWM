@@ -17,6 +17,7 @@ from src.utils.formatting import output_dir_for_experiment
 from src.utils.io import ensure_dir, load_json, load_pickle, save_json, save_pickle
 from src.utils.methods import benchmark_track, method_id, task_id, train_mode
 from src.utils.progress import progress_write
+from src.utils.queue_progress import update_progress
 
 
 def _summarize_extra_metrics(extra_metrics: dict) -> dict:
@@ -194,6 +195,13 @@ def run_experiment(
     params = dict(params)
     params.setdefault("train_mode", "online")
     params.setdefault("method_id", method_id(params))
+    update_progress(
+        status="running",
+        phase="starting",
+        method_id=params.get("method_id"),
+        total_steps=params.get("offline_train_steps"),
+        step=0,
+    )
     output_dir = Path(output_dir) if output_dir is not None else output_dir_for_experiment(params)
     ensure_dir(output_dir)
     metrics_path = output_dir / "metrics.pkl"
@@ -203,6 +211,15 @@ def run_experiment(
         _save_readable_metrics(params, metrics, output_dir, eval_summary)
         if manifest is not None:
             write_manifest(output_dir, manifest, status="completed")
+        update_progress(
+            status="completed",
+            phase="complete",
+            method_id=params.get("method_id"),
+            total_steps=params.get("offline_train_steps"),
+            step=metrics.get("summary", {}).get("total_gradient_steps", params.get("offline_train_steps")),
+            mean_return=eval_summary.get("mean_return") if eval_summary else None,
+            mean_success=eval_summary.get("mean_success") if eval_summary else None,
+        )
         if not quiet:
             print(f"Already done: {output_dir}")
             _print_summary("Train summary:", metrics["summary"])
@@ -222,6 +239,14 @@ def run_experiment(
         timing["optimization_seconds"] = float(time.perf_counter() - optimization_started)
 
         training_summary = result["metrics"].get("summary", {})
+        update_progress(
+            status="running",
+            phase="evaluation",
+            method_id=params.get("method_id"),
+            total_steps=params.get("offline_train_steps"),
+            step=training_summary.get("total_gradient_steps", params.get("offline_train_steps")),
+            early_stop_reason=training_summary.get("early_stop_reason"),
+        )
         if bool(training_summary.get("early_stopped", False)):
             _phase(
                 params,
@@ -258,6 +283,15 @@ def run_experiment(
                 progress_desc="final_eval",
             )
             timing["evaluation_seconds"] = float(time.perf_counter() - evaluation_started)
+            update_progress(
+                status="running",
+                phase="evaluation",
+                method_id=params.get("method_id"),
+                total_steps=params.get("eval_episodes"),
+                step=params.get("eval_episodes"),
+                mean_return=eval_result["summary"].get("mean_return"),
+                mean_success=eval_result["summary"].get("mean_success"),
+            )
             _phase(
                 params,
                 "direct evaluation complete | "
@@ -312,6 +346,15 @@ def run_experiment(
         _save_readable_metrics(params, result["metrics"], output_dir, eval_summary)
         if manifest is not None:
             write_manifest(output_dir, manifest, status="completed")
+        update_progress(
+            status="completed",
+            phase="complete",
+            method_id=params.get("method_id"),
+            total_steps=params.get("offline_train_steps"),
+            step=training_summary.get("total_gradient_steps", params.get("offline_train_steps")),
+            mean_return=eval_summary.get("mean_return") if eval_summary else None,
+            mean_success=eval_summary.get("mean_success") if eval_summary else None,
+        )
         if not quiet:
             print(f"Finished run: {output_dir}")
             _print_summary("Train summary:", result["metrics"]["summary"])

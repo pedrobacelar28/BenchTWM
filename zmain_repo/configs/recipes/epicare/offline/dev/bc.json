@@ -17,7 +17,7 @@
   "offline_eval_episodes": 500,
   "eval_episodes": 500,
   "eval_seed_base": 100000,
-  "early_stopping_patience": 10,
+  "early_stopping_patience": 20,
   "early_stopping_min_delta": 0.0,
   "ope_enabled": true,
   "ope_bootstrap_replicates": 100,

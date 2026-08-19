@@ -58,7 +58,9 @@ Every offline recipe uses `validation_loss` as its checkpoint-selection and
 early-stopping monitor; lower is better. The meaning of that scalar remains
 algorithm-specific and it is never the simulator return. PPO remains
 implemented for compatibility/online experiments but is not a public v0
-offline baseline.
+offline baseline. The public recipes use a common patience of 20 validation
+checks (an explicit recipe value or the trainer default); experiments may
+override it for diagnostic smoke tests.
 
 The training plan prints the monitor, direction, `min_delta`, patience in
 validation checks, and validation cadence. At every validation check, the CLI

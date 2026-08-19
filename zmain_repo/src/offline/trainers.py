@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
 from src.utils.progress import progress_write, tqdm
+from src.utils.queue_progress import update_progress
 
 from src.algorithms.cem_world_models import batch_loss as _cem_batch_loss
 from src.algorithms.cem_world_models import build_model as _build_cem_model
@@ -206,7 +207,7 @@ def _eval_during_training(args) -> bool:
 
 
 def _make_early_stopping_state(args) -> EarlyStoppingState:
-    patience = int(getattr(args, "early_stopping_patience", 0))
+    patience = int(getattr(args, "early_stopping_patience", 20))
     enabled = patience > 0
     return EarlyStoppingState(
         enabled=enabled,
@@ -468,6 +469,15 @@ def _training_batches(args, dataset: OfflineTransitionDataset, device: str | tor
             eval_due = _eval_during_training(args) and (
                 is_last or (_eval_interval(args) > 0 and step % _eval_interval(args) == 0)
             )
+            if step == 1 or log_due:
+                update_progress(
+                    status="running",
+                    phase="optimization",
+                    method_id=desc,
+                    step=step,
+                    total_steps=schedule.total_steps,
+                    sampled_transitions=sampled_transitions,
+                )
             yield OfflineProgress(step, sampled_transitions, log_due, eval_due, progress_bar), batch, schedule
     finally:
         # Trainers may break early after a validation check. Close the shared
@@ -499,6 +509,13 @@ def _validation_loss(
         raise RuntimeError(f"Validation dataset {val_dataset.path} produced no batches")
     loss_value = total_loss / total_count
     averaged = {key: value / total_count for key, value in summed_info.items()}
+    update_progress(
+        status="running",
+        phase="optimization",
+        step=progress.step if progress is not None else None,
+        total_steps=getattr(args, "offline_train_steps", None),
+        validation_loss=loss_value,
+    )
     rows: dict[str, float | int] = {}
     if train_loss is not None:
         rows["train_loss"] = float(train_loss)

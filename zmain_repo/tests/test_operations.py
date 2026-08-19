@@ -16,6 +16,8 @@ from src.algorithms.common import TrainLogger
 from src.algorithms.registry import get_policy_loader, get_trainer_for_mode
 from src.operations.artifacts import initial_manifest, run_directory, write_manifest
 from src.operations.catalog import Catalog, apply_overrides, parse_overrides
+from src.operations.queue import _write_suite_results
+from src.utils.io import load_json, save_json
 
 
 class TestOperations(unittest.TestCase):
@@ -82,6 +84,15 @@ class TestOperations(unittest.TestCase):
                 self.assertIsNotNone(get_trainer_for_mode(params["algo"], recipe.mode))
                 self.assertIsNotNone(get_policy_loader(params["algo"]))
 
+    def test_public_offline_recipes_default_to_twenty_validation_checks_of_patience(self):
+        catalog = Catalog.load()
+        for recipe in catalog.recipes:
+            if recipe.mode != "offline":
+                continue
+            dataset = next(item for item in catalog.datasets if item.env_id == recipe.env_id and item.tier == recipe.tier)
+            params, _, _ = catalog.run_config(dataset.identifier, recipe.method_id, mode=recipe.mode, artifact_root="/tmp/bench-artifacts")
+            self.assertEqual(params["early_stopping_patience"], 20, recipe.identifier)
+
     def test_clean_run_directory_and_manifest(self):
         params = {"env_id": "epicare", "algo": "dqn", "train_mode": "offline", "seed": 4, "obs_backend": "state_vector"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +147,92 @@ class TestOperations(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("Use public method ID 'latent-model'", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_suite_results_collects_run_metrics_and_planning_gain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_dir = root / "queues" / "queue-1"
+            direct_dir = root / "runs" / "dqn"
+            planning_dir = root / "runs" / "raw-model"
+            for output_dir, method_id, track, mean_return, mean_success in (
+                (direct_dir, "dqn", "direct_rl", 10.0, 0.8),
+                (planning_dir, "raw-model", "provisional_planning", 7.0, 0.6),
+            ):
+                output_dir.mkdir(parents=True)
+                save_json(
+                    {
+                        "run_id": f"run-{method_id}",
+                        "dataset_id": "epicare/smart/dev",
+                        "task_id": "epicare/smart/dev|obs=state_vector|action=discrete|mode=offline",
+                        "method_id": method_id,
+                        "track": track,
+                        "environment": "epicare",
+                        "train_mode": "offline",
+                        "seed": 0,
+                        "status": "completed",
+                    },
+                    output_dir / "run_manifest.json",
+                )
+                save_json(
+                    {
+                        "dataset_id": "epicare/smart/dev",
+                        "task_id": "epicare/smart/dev|obs=state_vector|action=discrete|mode=offline",
+                        "method_id": method_id,
+                        "track": track,
+                        "obs_backend": "state_vector",
+                        "action_type": "discrete",
+                        "seed": 0,
+                    },
+                    output_dir / "config.json",
+                )
+                save_json(
+                    {
+                        "train_summary": {"total_gradient_steps": 2},
+                        "timing_summary": {"optimization_seconds": 1.5, "evaluation_seconds": 0.5},
+                        "eval_summary": {"mean_return": mean_return, "mean_success": mean_success, "mean_length": 3.0},
+                    },
+                    output_dir / "metrics_summary.json",
+                )
+                save_json({"mean_return": mean_return, "mean_success": mean_success, "mean_length": 3.0}, output_dir / "eval_summary.json")
+            queue_dir.mkdir(parents=True)
+            manifest = {
+                "schema_version": 1,
+                "queue_id": "queue-1",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "finished_at": "2026-01-01T00:01:00+00:00",
+                "failures": 0,
+                "max_workers": 1,
+                "gpus": [],
+                "jobs": [
+                    {
+                        "name": "dqn-seed-0",
+                        "status": "completed",
+                        "output_dir": str(direct_dir),
+                        "method_id": "dqn",
+                        "track": "direct_rl",
+                        "dataset_id": "epicare/smart/dev",
+                        "task_id": "epicare/smart/dev|obs=state_vector|action=discrete|mode=offline",
+                        "seed": 0,
+                    },
+                    {
+                        "name": "raw-model-seed-0",
+                        "status": "completed",
+                        "output_dir": str(planning_dir),
+                        "method_id": "raw-model",
+                        "track": "provisional_planning",
+                        "dataset_id": "epicare/smart/dev",
+                        "task_id": "epicare/smart/dev|obs=state_vector|action=discrete|mode=offline",
+                        "seed": 0,
+                    },
+                ],
+            }
+            destination = _write_suite_results(queue_dir, manifest)
+            payload = load_json(destination)
+            self.assertEqual(payload["suite"]["status"], "completed")
+            self.assertEqual(payload["counts"]["total"], 2)
+            self.assertEqual(payload["best_direct_rl"]["epicare/smart/dev|obs=state_vector|action=discrete|mode=offline"]["method_id"], "dqn")
+            self.assertEqual(payload["planning_gain"][0]["best_direct_method_id"], "dqn")
+            self.assertAlmostEqual(payload["planning_gain"][0]["planning_gain_return"], -3.0)
 
     def test_ope_rejects_canonical_write_for_a_counterfactual_target(self):
         command = [

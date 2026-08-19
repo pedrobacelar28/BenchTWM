@@ -70,7 +70,7 @@ New generated files are ignored by Git and live only under `artifacts/`:
 artifacts/
   datasets/<dataset-id>/{train,val,ope_test}.npz
   runs/<env>/<dataset>/<mode>/<method>/seed-<n>--<hash>/
-  queues/<timestamp>/{jobs,logs,queue_manifest.json}
+  queues/<timestamp>/{jobs,logs,progress,queue_manifest.json,suite_results.json}
   reports/
   studies/
 ```
