@@ -18,3 +18,7 @@ artifacts/
 *.pkl
 *.npz
 *.log
+
+# Vendored ICU-Sepsis dynamics are immutable runtime assets, not generated
+# experiment artifacts. Keep this package asset available after cleanups.
+!third_party/icu-sepsis/packages/icu_sepsis/icu_sepsis/envs/assets/dynamics.npz
