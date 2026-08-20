@@ -36,6 +36,9 @@ def _episodes(
     )
     try:
         for indices in dataset._episode_indices:
+            reset_episode = getattr(policy, "reset_episode", None)
+            if callable(reset_episode):
+                reset_episode()
             order = indices[np.argsort(data["timesteps"][indices], kind="stable")]
             rewards = []
             ratios = []
@@ -60,6 +63,9 @@ def _episodes(
                 ratios.append(ratio)
                 target_probs.append(probability)
                 behavior_probs.append(float(np.exp(behavior_logprob)))
+                observe = getattr(policy, "observe", None)
+                if callable(observe):
+                    observe(action, float(data["rewards"][index]))
                 transition_bar.update(1)
             records.append({"rewards": np.asarray(rewards, dtype=np.float64), "ratios": np.asarray(ratios, dtype=np.float64)})
     finally:

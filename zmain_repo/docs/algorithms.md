@@ -2,7 +2,7 @@
 
 ## Scope
 
-The suite implements five local agent families. They share observation backends, action masks, checkpoint loading, direct evaluation, and `action_probabilities(obs, info, deterministic=...)` for OPE.
+The suite implements six local agent families. They share observation backends, action masks, checkpoint loading, direct evaluation, and `action_probabilities(obs, info, deterministic=...)` for OPE.
 
 This differs from the upstream EpiCare paper. That paper studies AWAC, EDAC, TD3+BC, IQL, CQL, behavior cloning, and DQN. This suite vendors EpiCare's environment and policies but implements the methods below.
 
@@ -13,6 +13,7 @@ This differs from the upstream EpiCare paper. That paper studies AWAC, EDAC, TD3
 | Raw world model | `raw_model` | Learned dynamics with CEM MPC | Fixed-data learned model with CEM MPC |
 | Latent world model | `latent_model` | EMA-target latent dynamics with CEM MPC | Same objective on fixed data |
 | Reconstructive world model | `reconstructive_model` | Latent dynamics plus reconstruction with CEM MPC | Same objective on fixed data |
+| DreamerV3-style | `dreamer` | Not available | Recurrent world model and imagined actor-critic learning on fixed trajectories |
 
 ## Observation Encoders and Masks
 
@@ -43,6 +44,24 @@ Every world-model family predicts a next-state representation, immediate reward,
 | Reconstructive | Latent target plus decoded next observation | Latent, reconstruction, reward, continuation |
 
 Offline world-model validation computes multi-step rollout errors at horizons derived from `cem_horizon`: state error, reward error, continuation loss, discounted-return error, and cumulative state error. These are model-fit diagnostics, not direct policy-quality estimates.
+
+## Offline DreamerV3-style
+
+`dreamer` is a PyTorch port of the pinned JAX DreamerV3 vector/discrete-action
+path. It reconstructs state records from the transition schema, keeps RSSM
+carry across consecutive 64-step chunks, and resets only at real episode
+boundaries. The loss includes posterior/prior KL, vector reconstruction,
+two-hot reward and value heads, continuation prediction, imagined categorical
+actor learning, slow-value regularization, lambda returns, and replay-value
+learning. The optimizer preserves the JAX AGC, RMS scaling, momentum, and
+warmup chain.
+
+Only `state_vector` is encoded. The categorical stochastic RSSM state and
+one-hot action embedding are internal model variables, not one-hot agent
+observations. At deployment, the environment mask is applied to actor logits;
+the unmasked imagination equations remain identical to the source algorithm.
+Direct evaluation uses the actor mode, while stochastic OPE uses its exact
+masked categorical distribution. See [Dreamer fidelity audit](dreamer-fidelity.md).
 
 ## Training Metrics
 

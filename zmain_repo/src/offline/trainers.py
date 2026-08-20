@@ -23,12 +23,15 @@ from src.algorithms.cem_world_models import rollout_validation_metrics as _cem_r
 from src.algorithms.bc import BCPolicy
 from src.algorithms.cql import CQLPolicy
 from src.algorithms.dqn import DQNPolicy
+from src.algorithms.dreamer import DreamerPolicy
 from src.algorithms.iql import IQLPolicy
 from src.algorithms.ppo import PPOPolicy
 from src.evaluation import evaluate_policy
 from src.models.mlp import build_actor_critic, build_q_network
+from src.models.dreamer import DreamerAgent, DreamerConfig, DreamerOptimizer
 from src.models.offline_rl import build_cql_agent, build_iql_agent
 from src.offline.dataset import OfflineTransitionDataset
+from src.offline.dreamer_dataset import DreamerSequenceStream
 from src.utils.metrics import summarize_training
 from src.utils.methods import method_id
 from src.utils.seeding import set_seed
@@ -223,6 +226,7 @@ def _update_early_stopping(
     validation_loss: float,
     progress: OfflineProgress,
     checkpoint: dict[str, Any],
+    checkpoint_is_snapshot: bool = False,
 ) -> tuple[bool, bool]:
     state.num_checks += 1
     improved = validation_loss < (state.best_loss - state.min_delta)
@@ -230,7 +234,7 @@ def _update_early_stopping(
         state.best_loss = float(validation_loss)
         state.best_step = int(progress.step)
         state.best_sampled_transitions = int(progress.sampled_transitions)
-        state.best_checkpoint = copy.deepcopy(checkpoint)
+        state.best_checkpoint = checkpoint if checkpoint_is_snapshot else copy.deepcopy(checkpoint)
         state.checks_without_improvement = 0
         return True, False
     state.checks_without_improvement += 1
@@ -1069,6 +1073,234 @@ def train_reconstructive_model(config: dict, output_dir):
     return _train_cem_model(config, output_dir, model_family="reconstructive_model")
 
 
+def _dreamer_checkpoint(agent: DreamerAgent) -> dict:
+    return {
+        "checkpoint_format": "benchtwm-dreamer-v1",
+        "dreamer_config": agent.config.asdict(),
+        # A 200M Dreamer checkpoint must not duplicate the full model on GPU
+        # during validation-selected checkpointing.
+        "model_state_dict": {
+            key: value.detach().cpu().clone()
+            for key, value in agent.state_dict().items()
+        },
+    }
+
+
+def _dreamer_validation(
+    agent: DreamerAgent,
+    dataset: OfflineTransitionDataset,
+    args,
+    device: torch.device,
+) -> tuple[float, dict[str, float]]:
+    stream = DreamerSequenceStream(
+        dataset,
+        batch_size=int(args.offline_batch_size),
+        sequence_length=int(getattr(args, "dreamer_batch_length", 64)),
+        seed=int(args.seed) + 200000,
+        shuffle=False,
+        cycle=False,
+    )
+    total_loss = 0.0
+    total_records = 0
+    totals: dict[str, float] = {}
+    carry = None
+    previous_action = None
+    was_training = agent.training
+    agent.eval()
+    devices = [device.index] if device.type == "cuda" and device.index is not None else []
+    with torch.random.fork_rng(devices=devices), torch.no_grad():
+        torch.manual_seed(int(args.seed) + 300000)
+        while True:
+            batch = stream.next_batch(device=device)
+            if batch is None:
+                break
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=agent.config.autocast_enabled(device),
+            ):
+                loss, info, carry, previous_action = agent.loss(
+                    batch,
+                    carry,
+                    previous_action,
+                    update_norms=False,
+                )
+            count = batch.valid_records
+            total_loss += float(loss.item()) * count
+            total_records += count
+            for key, value in info.items():
+                totals[key] = totals.get(key, 0.0) + float(value.item()) * count
+    agent.train(was_training)
+    if total_records <= 0:
+        raise RuntimeError(f"Validation dataset {dataset.path} produced no Dreamer sequences")
+    return total_loss / total_records, {key: value / total_records for key, value in totals.items()}
+
+
+def train_dreamer(config: dict, output_dir):
+    del output_dir
+    args = SimpleNamespace(**config)
+    _validate_step_config(args)
+    if str(args.obs_backend) != "state_vector":
+        raise ValueError("Dreamer only supports obs_backend='state_vector'")
+    set_seed(args.seed)
+    device = get_torch_device()
+    train_dataset, val_dataset = _load_datasets(args, "state_vector")
+    model_config = DreamerConfig.from_mapping(
+        config,
+        obs_dim=train_dataset.obs_dim,
+        num_actions=train_dataset.num_actions,
+    )
+    agent = DreamerAgent(model_config).to(device)
+    optimizer = DreamerOptimizer(
+        agent.optimized_parameters,
+        learning_rate=float(getattr(args, "learning_rate", 4e-5)),
+        agc=float(getattr(args, "dreamer_agc", 0.3)),
+        eps=float(getattr(args, "dreamer_optimizer_eps", 1e-20)),
+        beta1=float(getattr(args, "dreamer_beta1", 0.9)),
+        beta2=float(getattr(args, "dreamer_beta2", 0.999)),
+        warmup=int(getattr(args, "dreamer_warmup", 1000)),
+    )
+    sequence_length = int(getattr(args, "dreamer_batch_length", 64))
+    stream = DreamerSequenceStream(
+        train_dataset,
+        batch_size=int(args.offline_batch_size),
+        sequence_length=sequence_length,
+        seed=int(args.seed),
+        shuffle=True,
+        cycle=True,
+    )
+    schedule = OfflineSchedule(
+        total_steps=int(args.offline_train_steps),
+        batch_size=int(args.offline_batch_size),
+        total_sampled_transitions_estimate=int(args.offline_train_steps)
+        * int(args.offline_batch_size)
+        * sequence_length,
+    )
+    early_stopping = _make_early_stopping_state(args)
+    train_history: list[dict] = []
+    eval_history: list[dict] = []
+    carry = None
+    previous_action = None
+    sampled_records = 0
+    last_progress: OfflineProgress | None = None
+    progress_bar = tqdm(
+        range(1, schedule.total_steps + 1),
+        desc=method_id(config),
+        unit="step",
+        dynamic_ncols=True,
+        disable=not _use_tqdm_bars(args),
+    )
+    try:
+        for step in progress_bar:
+            batch = stream.next_batch(device=device)
+            if batch is None:
+                raise RuntimeError("Cycling Dreamer training stream was unexpectedly exhausted")
+            sampled_records += batch.valid_records
+            is_last = step == schedule.total_steps
+            log_due = is_last or (_log_interval(args) > 0 and step % _log_interval(args) == 0)
+            eval_due = _eval_during_training(args) and (
+                is_last or (_eval_interval(args) > 0 and step % _eval_interval(args) == 0)
+            )
+            progress = OfflineProgress(step, sampled_records, log_due, eval_due, progress_bar)
+            last_progress = progress
+            if step == 1 or log_due:
+                update_progress(
+                    status="running",
+                    phase="optimization",
+                    method_id=method_id(config),
+                    step=step,
+                    total_steps=schedule.total_steps,
+                    sampled_transitions=sampled_records,
+                )
+            agent.train()
+            optimizer.zero_grad()
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=agent.config.autocast_enabled(device),
+            ):
+                loss, info, carry, previous_action = agent.loss(
+                    batch,
+                    carry,
+                    previous_action,
+                    update_norms=True,
+                )
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Dreamer produced non-finite loss at step {step}: {float(loss.item())}")
+            loss.backward()
+            optimizer_info = optimizer.step()
+            agent.update_slow_value()
+            # Recurrent state is intentionally carried across consecutive
+            # chunks, but never across gradient graphs.
+            carry = {key: value.detach() for key, value in carry.items()}
+            previous_action = previous_action.detach()
+            scalar_info = {key: float(value.item()) for key, value in info.items()}
+            scalar_info.update(optimizer_info)
+            _set_train_postfix(progress, float(loss.item()), {"wm": scalar_info["loss_rec"]})
+            stop_due = False
+            if log_due:
+                val_loss, val_info = _dreamer_validation(agent, val_dataset, args, device)
+                row = {
+                    "step": step,
+                    "sampled_transitions": sampled_records,
+                    "loss": float(loss.item()),
+                    "validation_loss": float(val_loss),
+                    **scalar_info,
+                    **{f"validation_{key}": value for key, value in val_info.items()},
+                }
+                train_history.append(row)
+                _write_metrics(
+                    args,
+                    "val",
+                    progress,
+                    {
+                        "train_loss": float(loss.item()),
+                        "validation_loss": float(val_loss),
+                        "validation_transitions": int(val_dataset.size),
+                    },
+                )
+                checkpoint_improves = (
+                    early_stopping.best_checkpoint is None
+                    or float(val_loss) < early_stopping.best_loss - early_stopping.min_delta
+                )
+                checkpoint = _dreamer_checkpoint(agent) if checkpoint_improves else {}
+                improved, stop_due = _update_early_stopping(
+                    early_stopping,
+                    validation_loss=float(val_loss),
+                    progress=progress,
+                    checkpoint=checkpoint,
+                    checkpoint_is_snapshot=True,
+                )
+                _report_early_stopping(
+                    args,
+                    early_stopping,
+                    progress=progress,
+                    validation_loss=float(val_loss),
+                    improved=improved,
+                    stop_due=stop_due,
+                )
+            if eval_due:
+                stats = _eval_stats(DreamerPolicy(agent), config, progress, args)
+                eval_history.append(stats)
+            if stop_due:
+                break
+    finally:
+        progress_bar.close()
+
+    training_metadata = _finalize_early_stopping(early_stopping, progress=last_progress, schedule=schedule)
+    metrics = _metrics_from_history(
+        train_history,
+        eval_history,
+        args,
+        config,
+        train_dataset,
+        val_dataset,
+        schedule,
+        training_metadata=training_metadata,
+    )
+    return _final_result(metrics, _dreamer_checkpoint(agent), early_stopping.best_checkpoint)
+
+
 OFFLINE_TRAINERS = {
     "raw_model": train_raw_model,
     "latent_model": train_latent_model,
@@ -1078,6 +1310,7 @@ OFFLINE_TRAINERS = {
     "bc": train_bc,
     "iql": train_iql,
     "cql": train_cql,
+    "dreamer": train_dreamer,
 }
 
 

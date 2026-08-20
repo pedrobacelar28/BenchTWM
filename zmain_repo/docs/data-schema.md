@@ -68,6 +68,7 @@ compatibility/ablation backend. Algorithms select the exact view through
 | CQL | DQN fields plus next-state Q | TD target plus admissible-action conservative regularization |
 | Raw world model | Observation, action, next observation, reward, terminal | Next observation, reward, continuation prediction |
 | Latent/reconstructive world model | Sequence windows over the same fields | Multi-step latent/decoded dynamics and rollout validation |
+| Dreamer | Episode-preserving state-vector sequences, categorical actions, rewards, terminals, and masks | RSSM/world-model losses plus imagined actor/value learning |
 | OPE | Ordered trajectory, logged action, reward, behavior log probability | Importance ratios against target policy probabilities |
 
 `state_ids` are necessary for ICU tabular diagnostics and sequence bookkeeping.
@@ -75,6 +76,12 @@ For EpiCare, they contain the privileged disease identifier but are not passed t
 the MLP agents or treated as an input feature. For DTR environments, they are
 deterministic fingerprints of the visible vector only; they are not a tabular
 encoding and never expose the hidden simulator state.
+
+Dreamer does not read `state_ids`. Its loader converts each episode from
+transition records into Dreamer's reward-on-arrival state records, adds
+`is_first`, `is_last`, `is_terminal`, and `valid_mask` in memory, and retains
+the recurrent carry between consecutive chunks of long DTR episodes. These
+fields are derived at training time and do not alter the public NPZ schema.
 
 ## Behavior Policies and Propensities
 

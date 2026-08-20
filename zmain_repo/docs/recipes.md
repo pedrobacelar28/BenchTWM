@@ -13,14 +13,18 @@ names use underscores internally, but are not CLI aliases. Use the IDs shown by
 
 | Environment | Method IDs |
 |---|---|
-| EpiCare v0 offline | `bc`, `dqn`, `iql`, `cql`, `raw-model`, `latent-model`, `reconstructive-model` |
-| ICU-Sepsis v0 offline | `bc`, `dqn`, `iql`, `cql`, `raw-model/continuous-cem`, `latent-model/continuous-cem`, `reconstructive-model/continuous-cem` |
+| EpiCare v0 offline | `bc`, `dqn`, `iql`, `cql`, `raw-model`, `latent-model`, `reconstructive-model`, `dreamer` |
+| ICU-Sepsis v0 offline | `bc`, `dqn`, `iql`, `cql`, `raw-model/continuous-cem`, `latent-model/continuous-cem`, `reconstructive-model/continuous-cem`, `dreamer` |
+| DTR setting1 offline | `bc`, `dqn`, `iql`, `cql`, `raw-model`, `latent-model`, `reconstructive-model`, `dreamer` |
 | Compatibility/online | PPO and discrete-CEM recipes remain available outside the v0 leaderboard |
 
 For example, the latent EpiCare world model is invoked with:
 
 ```bash
 python scripts/bench.py train epicare/smart/final latent-model
+python scripts/bench.py train epicare/soc/dev dreamer
+python scripts/bench.py train icu-sepsis/expert/dev dreamer
+python scripts/bench.py train dtr-ahn-chemo/setting1/random/dev dreamer
 ```
 
 Dataset recipes live under `configs/datasets/<environment>/`. Method recipes

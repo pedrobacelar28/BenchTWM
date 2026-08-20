@@ -142,7 +142,7 @@ where disease cost is zero in the default \code{use\_disease\_rewards=false} set
 Treatment $a\in\{0,\ldots,15\}$ is represented by the scalar integer index and label \code{Treatment <a>}. All treatments are currently marked admissible, so $m_t=\mathbf{1}_{16}$; nevertheless the generic action-mask field is retained so no algorithm needs an EpiCare-specific data path. EpiCare collection can use \code{random}, \code{smart}, \code{soc}, or \code{oracle}. Random is uniform. SMART (the local default) uses the ClinicalTrial policy's fixed weighted distribution over treatments, which enforces an 8:1 ratio between the most and least probable treatment. SoC starts from marginal expected-reward values, avoids actions that would increase already high symptoms when possible, and updates its treatment estimates after observed rewards. Oracle selects the highest expected-reward treatment using the latent disease and is therefore a reference upper baseline, not an admissible partially observed deployed policy. In all cases the logged generator samples from the policy's actual categorical distribution and records its exact log propensity.
 
 \paragraph{Relationship to the EpiCare paper.}
-The source paper evaluates BC, DQN, AWAC, EDAC, TD3+BC, IQL, and CQL, including architecture and history-input choices specific to that study \cite{hargrave2024epicare}. BenchTWM does \emph{not} vendor those implementations or claim their results. It exposes EpiCare to the five local families defined in Section~\ref{sec:methods}. In particular, the local EpiCare input is the current 8-symptom vector; it is not a reproduction of source-paper history augmentation.
+The source paper evaluates BC, DQN, AWAC, EDAC, TD3+BC, IQL, and CQL, including architecture and history-input choices specific to that study \cite{hargrave2024epicare}. BenchTWM does \emph{not} vendor those implementations or claim their results. It exposes EpiCare to the six local families defined in Section~\ref{sec:methods}. Feed-forward methods receive the current 8-symptom vector; Dreamer receives the same vector while maintaining its own recurrent RSSM carry.
 
 \subsection{DTR AhnChemo and GhaffariCancer}
 \label{sec:dtr}
@@ -230,7 +230,7 @@ The schema above is BenchTWM's integration format, not an assertion that its sou
 \section{Implemented Algorithms}
 \label{sec:methods}
 
-The repository implements five local families: DQN, PPO, raw dynamics, latent dynamics, and reconstructive latent dynamics. All use categorical actions and respect the first-step action mask. DQN and PPO are policy/value methods. The other three methods learn a one-step world model and use CEM planning at action time. They are separate from the source EpiCare paper's AWAC, EDAC, TD3+BC, IQL, and CQL implementations.
+The repository implements six local families: DQN, PPO, raw dynamics, latent dynamics, reconstructive latent dynamics, and an offline DreamerV3-style agent. All use categorical actions and respect the deployed action mask. DQN and PPO are policy/value methods. Three methods learn a one-step world model and use CEM planning at action time. Dreamer jointly learns a recurrent world model and an actor--critic from imagined latent trajectories \cite{hafner2023dreamerv3}. These methods are separate from the source EpiCare paper's implementations.
 
 \subsection{Shared parameterizations and masks}
 
@@ -326,6 +326,13 @@ The reconstruction loss is discrete cross entropy or continuous MSE according to
 \paragraph{World-model validation.}
 For all three families, the primary checkpoint criterion remains one-step validation loss. Additionally, the suite rolls models forward on contiguous held-out windows of lengths $1$, $3$, $5$, and up to the planning horizon. It exports final state error, average reward error, average continuation loss, discounted-return error, and cumulative state error. These diagnose model fit and compounding error. They are neither policy-value estimates nor replacements for direct simulator evaluation.
 
+\subsection{Offline DreamerV3-style agent}
+\label{sec:dreamer}
+
+Dreamer consumes only the public state vector and reconstructs ordered state records from logged transitions. Its RSSM combines a blocked deterministic recurrent state with a straight-through categorical stochastic state. The world-model objective contains balanced posterior--prior KL with free nats, symlog observation reconstruction, symmetric two-hot reward prediction, and continuation prediction. Starting from posterior states, the model generates 15-step latent trajectories and trains a categorical actor and slow-regularized two-hot value head with continuation weighting and lambda returns. A replay-value loss additionally trains values on logged trajectories. The PyTorch port preserves the JAX module order, stop-gradient placement, normalization, slow-value update, and AGC--RMS--momentum optimizer chain. The source configuration uses batches of 16 sequences of length 64. Long episodes preserve detached RSSM carry between chunks; resets occur only at real episode boundaries.
+
+The environment action mask is a deployment constraint outside the Dreamer equations: invalid actor logits are suppressed for direct evaluation and OPE, while the public observation remains the unmodified structured vector. The implementation is therefore identified as a DreamerV3-style offline adaptation rather than a byte-for-byte JAX reproduction.
+
 \subsection{Categorical CEM planning}
 \label{sec:cem}
 
@@ -343,7 +350,7 @@ The first action of the best sequence is deployed. The planner records its first
 \section{Optimization, Validation, and Checkpointing}
 \label{sec:training}
 
-Offline configurations are step-based. \code{offline\_train\_steps} specifies optimizer updates; \code{offline\_batch\_size} specifies transitions per update; their product is the nominal number of sampled transitions, which can exceed the unique dataset size because sampling is with replacement. \code{offline\_log\_interval} controls validation-loss logging, while \code{offline\_eval\_interval} optionally triggers an intermediate direct simulator evaluation. The direct evaluation is useful for monitoring but does not select the saved best checkpoint.
+Offline configurations are step-based. \code{offline\_train\_steps} specifies optimizer updates. Feed-forward methods interpret \code{offline\_batch\_size} as transitions per update; Dreamer interprets it as recurrent sequences and multiplies it by \code{dreamer\_batch\_length} for the nominal state-record count. \code{offline\_log\_interval} controls validation-loss logging, while \code{offline\_eval\_interval} optionally triggers an intermediate direct simulator evaluation. The direct evaluation is useful for monitoring but does not select the saved best checkpoint.
 
 At each validation point the trainer computes average loss on the complete validation transition split, retaining the algorithm-specific components. The best checkpoint is the smallest validation loss seen so far. Optional early stopping compares that same loss using \code{early\_stopping\_patience} and \code{early\_stopping\_min\_delta}. The final direct evaluation always loads the validation-selected best checkpoint. Thus the roles are: training split for gradient updates, validation split for model selection, simulator for direct policy evaluation, and OPE holdout for counterfactual diagnostics.
 
@@ -403,7 +410,7 @@ The operational CLI \code{scripts/bench.py} exposes a single offline-first lifec
 \section{Limitations and Non-Claims}
 \label{sec:limitations}
 
-First, shared field names do not imply a shared clinical scale. ICU SOFA, EpiCare symptom burden, and DTR tumor/dose metrics have different origins, ranges, and meanings. Environment-specific success measures should never be pooled into one unqualified clinical number. Second, EpiCare and the DTR environments intentionally exclude hidden simulator state from policy inputs; recurrent history models are not currently implemented. Third, the raw, latent, and reconstructive models are learned one-step predictors with CEM planning, not uncertainty-calibrated causal models. Fourth, IS-family OPE is vulnerable to support mismatch and weight degeneracy, particularly for deterministic targets and multi-step treatment trajectories. Finally, no simulator benchmark, including these source environments, validates a policy for clinical use.
+First, shared field names do not imply a shared clinical scale. ICU SOFA, EpiCare symptom burden, and DTR tumor/dose metrics have different origins, ranges, and meanings. Environment-specific success measures should never be pooled into one unqualified clinical number. Second, EpiCare and the DTR environments intentionally exclude hidden simulator state from policy inputs; Dreamer's recurrence uses only observable history and cannot recover unidentifiable hidden variables. Third, the raw, latent, reconstructive, and Dreamer models are not uncertainty-calibrated causal models. Fourth, IS-family OPE is vulnerable to support mismatch and weight degeneracy, particularly for multi-step treatment trajectories. Finally, no simulator benchmark, including these source environments, validates a policy for clinical use.
 
 \begin{thebibliography}{9}
 
@@ -416,6 +423,11 @@ Kartik Choudhary, Dhawal Gupta, and Philip S. Thomas.
 Mason Hargrave, Alex Spaeth, and Logan Grosenick.
 \newblock EpiCare: A Reinforcement Learning Benchmark for Dynamic Treatment Regimes.
 \newblock NeurIPS Datasets and Benchmarks Track, 2024.
+
+\bibitem{hafner2023dreamerv3}
+Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap.
+\newblock Mastering Diverse Domains through World Models.
+\newblock arXiv:2301.04104, 2023.
 
 \end{thebibliography}
 

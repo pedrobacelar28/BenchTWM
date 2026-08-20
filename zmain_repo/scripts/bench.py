@@ -126,10 +126,12 @@ def _estimate(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("train_mode") == "offline":
         steps = int(params.get("offline_train_steps", 0))
         batch = int(params.get("offline_batch_size", 0))
+        sequence_length = int(params.get("dreamer_batch_length", 1)) if params.get("algo") == "dreamer" else 1
         return {
             "optimization_steps": steps,
             "batch_size": batch,
-            "sampled_transitions_estimate": steps * batch,
+            **({"sequence_length": sequence_length} if params.get("algo") == "dreamer" else {}),
+            "sampled_transitions_estimate": steps * batch * sequence_length,
             "offline_eval_interval": int(params.get("offline_eval_interval", 0)),
             "final_eval_episodes": int(params.get("eval_episodes", 0)),
         }
@@ -151,6 +153,7 @@ def _early_stopping_plan(params: dict[str, Any]) -> dict[str, Any]:
         "raw_model": "validation weighted world-model objective",
         "latent_model": "validation weighted latent-dynamics objective",
         "reconstructive_model": "validation weighted reconstruction-and-dynamics objective",
+        "dreamer": "validation Dreamer world-model, actor, and value objective",
     }
     patience = int(params.get("early_stopping_patience", 20))
     return {
@@ -749,6 +752,11 @@ def _tuning_space(trial, algo: str) -> dict[str, Any]:
         return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "tau": trial.suggest_float("tau", 1e-4, 0.1, log=True)}
     if algo == "ppo":
         return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "offline_bc_weight": trial.suggest_float("offline_bc_weight", 0.0, 1.0)}
+    if algo == "dreamer":
+        return {
+            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 2e-4, log=True),
+            "dreamer_imag_length": trial.suggest_int("dreamer_imag_length", 5, 20),
+        }
     return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-3, log=True), "cem_horizon": trial.suggest_int("cem_horizon", 3, 12)}
 
 

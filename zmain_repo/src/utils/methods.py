@@ -9,6 +9,7 @@ OFFLINE_METHOD_IDS = {
     "iql": "iql_offline",
     "cql": "cql_offline",
     "ppo": "ppo_logged_offline",
+    "dreamer": "dreamer",
 }
 
 CEM_MODEL_ALGOS = {"raw_model", "latent_model", "reconstructive_model"}
@@ -48,7 +49,7 @@ def benchmark_track(config: dict) -> str:
             raise ValueError(f"Unsupported benchmark track={value!r}; expected one of {sorted(TRACKS)}")
         return value
     algo = str(config.get("algo", ""))
-    if algo in CEM_MODEL_ALGOS:
+    if algo in CEM_MODEL_ALGOS or algo == "dreamer":
         return "provisional_planning"
     if train_mode(config) == "offline" and algo in {"bc", "dqn", "iql", "cql"}:
         return "direct_rl"

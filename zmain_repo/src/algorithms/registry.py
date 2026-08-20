@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.algorithms import bc, cql, dqn, iql, latent_model, ppo, raw_model, reconstructive_model
+from src.algorithms import bc, cql, dqn, dreamer, iql, latent_model, ppo, raw_model, reconstructive_model
 from src.offline.trainers import get_offline_trainer
 
 
@@ -24,6 +24,7 @@ POLICY_LOADERS = {
     "bc": bc.load_policy,
     "iql": iql.load_policy,
     "cql": cql.load_policy,
+    "dreamer": dreamer.load_policy,
 }
 
 

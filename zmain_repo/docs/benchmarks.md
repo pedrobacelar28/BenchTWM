@@ -34,9 +34,12 @@ admissible-action mask. Continuous actions are deferred to a future schema.
 
 The public tracks are `direct_rl` (BC, fitted/offline DQN, IQL, CQL),
 `provisional_planning` (the current raw, latent, and reconstructive model + CEM
-placeholders), and the reserved `published_planning` track. Each method uses
+placeholders, plus the offline DreamerV3-style agent), and the reserved
+`published_planning` track. Feed-forward methods use
 seeds `0, 1, 2`, batch 256, 5,000 optimization steps (1,280,000 sampled
 transitions), validation every 250 steps, and a final 500-episode evaluation.
+Dreamer uses its source configuration of batch 16 by sequence length 64 and
+the same 5,000-step/250-step validation protocol.
 All public datasets have held-out OPE available. ICU is still evaluated
 directly in the simulator as the primary result, while OPE remains a separate
 diagnostic evidence stream. Intermediate simulator evaluation is disabled.

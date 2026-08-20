@@ -32,6 +32,7 @@ PILOT_METHODS = {
         "raw-model/continuous-cem",
         "latent-model/continuous-cem",
         "reconstructive-model/continuous-cem",
+        "dreamer",
     },
 }
 
