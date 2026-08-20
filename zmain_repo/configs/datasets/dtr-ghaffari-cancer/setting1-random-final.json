@@ -1,0 +1,15 @@
+{
+  "behavior_policy": "random",
+  "dataset_name": "dtr_ghaffari_cancer_setting1_random_final_100000",
+  "env_id": "dtr-ghaffari-cancer",
+  "env_kwargs": {"setting": 1},
+  "environment_seed": 1,
+  "num_ope_episodes": 20000,
+  "num_train_episodes": 100000,
+  "num_val_episodes": 10000,
+  "obs_backend": "state_vector",
+  "ope_enabled": true,
+  "overwrite": false,
+  "schema_version": 1,
+  "seed": 0
+}

@@ -29,12 +29,6 @@ def _dataset_config(output_dir: Path, policy: str = "random_admissible", seed: i
     }
     if policy == "epsilon_expert":
         config["epsilon"] = 0.3
-    if policy == "mixed":
-        config["mixed_weights"] = {
-            "random_admissible": 0.34,
-            "expert": 0.33,
-            "optimal": 0.33,
-        }
     return config
 
 
@@ -131,7 +125,7 @@ class TestOfflinePipeline(unittest.TestCase):
 
     def test_behavior_policies_generate_finite_admissible_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for policy in ["random_admissible", "expert", "optimal", "epsilon_expert", "mixed"]:
+            for policy in ["random_admissible", "expert", "optimal", "epsilon_expert"]:
                 with self.subTest(policy=policy):
                     out = Path(tmp) / policy
                     generate_dataset(_dataset_config(out, policy=policy, seed=17))

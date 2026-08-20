@@ -19,7 +19,6 @@
   "eval_seed_base": 100000,
   "early_stopping_patience": 20,
   "early_stopping_min_delta": 0.0,
-  "ope_enabled": false,
   "save_checkpoints": true,
   "save_trajectories": true,
   "success_threshold": 0.82,

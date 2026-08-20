@@ -28,7 +28,7 @@ for Healthcare-Oriented World-Model Benchmarks}
 \maketitle
 
 \begin{abstract}
-BenchTWM is a reproducible suite for structured offline reinforcement learning (RL) and categorical-action world-model research. It integrates two healthcare-oriented simulators behind one adapter and one logged-transition schema: ICU-Sepsis, a finite MDP parameterized from MIMIC-III-derived assets, and EpiCare, a procedurally generated partially observable treatment benchmark. The suite is deliberately an integration rather than a reproduction of either source paper. It supplies fixed logged datasets, local DQN and PPO implementations, three local world-model families with cross-entropy method (CEM) planning, direct simulator evaluation, and importance-sampling off-policy evaluation (OPE). This specification defines the exact observation, action, dataset, optimization, and evaluation contracts used by the repository. It reports no empirical results and makes no clinical claims.
+BenchTWM is a reproducible suite for structured offline reinforcement learning (RL) and categorical-action world-model research. It integrates four healthcare-oriented simulators behind one adapter and one logged-transition schema: ICU-Sepsis, a finite MDP parameterized from MIMIC-III-derived assets; EpiCare, a procedurally generated partially observable treatment benchmark; and the AhnChemo and GhaffariCancer ODEs selectively vendored from DTRGym. The suite is deliberately an integration rather than a reproduction of any source paper. It supplies fixed logged datasets, local DQN and PPO implementations, three local world-model families with cross-entropy method (CEM) planning, direct simulator evaluation, and importance-sampling off-policy evaluation (OPE). This specification defines the exact observation, action, dataset, optimization, and evaluation contracts used by the repository. It reports no empirical results and makes no clinical claims.
 \end{abstract}
 
 \section{Scope and Design Principles}
@@ -44,7 +44,7 @@ The suite has four design goals:
     \item \textbf{Comparable reporting without false equivalence.} Return, success, episode length, action-change measures, and data-quality diagnostics are standardized. Clinical semantics, physical units, and primary safety metrics remain environment-specific.
 \end{enumerate}
 
-The suite is a benchmark engineering artifact, not a clinical decision-support system. ICU-Sepsis and EpiCare are simulators; direct simulator performance, OPE estimates, and learned policies must not be interpreted as treatment recommendations.
+The suite is a benchmark engineering artifact, not a clinical decision-support system. All four environments are simulators; direct simulator performance, OPE estimates, and learned policies must not be interpreted as treatment recommendations.
 
 \section{Notation and System Contract}
 \label{sec:contract}
@@ -59,7 +59,7 @@ The factory call
 \begin{equation}
     \code{make\_env(config, obs\_backend, seed)}
 \end{equation}
-instantiates an environment wrapper. Every wrapper exports an \code{EnvSpec}: environment ID, number of actions and states, observation dimensions, supported observation backends, feature names, action labels, action geometry, metric names, and primary metric. This specification is saved with evaluation artifacts, so a report never needs to infer that a 16-way categorical action belongs to EpiCare or that a 25-way action belongs to ICU-Sepsis.
+instantiates an environment wrapper. Every wrapper exports an \code{EnvSpec}: environment ID, number of actions and states, observation dimensions, supported observation backends, feature names, action labels, action geometry, metric names, and primary metric. This specification is saved with evaluation artifacts, so a report never needs to infer which environment owns a particular observation dimension or action geometry.
 
 All local policies implement two methods:
 \begin{align}
@@ -71,7 +71,7 @@ The second method is mandatory for OPE. In deterministic evaluation mode, DQN, P
 \section{Benchmark Environments}
 \label{sec:environments}
 
-Table~\ref{tab:environments} summarizes the agent-facing contracts. These common fields do \emph{not} make the two environments clinically comparable: ICU success denotes simulated survival while EpiCare success denotes simulated remission.
+Table~\ref{tab:environments} summarizes the agent-facing contracts. These common fields do \emph{not} make the environments clinically comparable: success retains each simulator's native outcome semantics.
 
 \begin{table*}[t]
 \centering
@@ -84,6 +84,8 @@ Environment & Source model & Policy observation & Action representation & Action
 \midrule
 ICU-Sepsis & finite MDP, 716 states & 716-way one-hot \emph{or} 47-dimensional cluster-center vector & 25 actions, $5 \times 5$ fluid/vasopressor grid & state-dependent mask from upstream asset & \code{sofa\_score} & positive total return; legacy alias \code{survived} \\
 EpiCare & generated POMDP, 16 diseases plus remission & 8-dimensional symptom vector only & 16 categorical treatments & all 16 currently valid & symptom burden, remission, adverse event, time to remission & remission \\
+DTR-AhnChemo & cancer ODE, normal cells hidden & 3-dimensional tumor/immune/drug vector & 5 ordinal dose bins from $[0,1]$ & all 5 currently valid & tumor, immune, drug, dose, death & horizon survival \\
+DTR-GhaffariCancer & metastatic cancer ODE, auxiliaries hidden & 7-dimensional natural-log vector & 25 actions, $5 \times 5$ radiotherapy/chemotherapy grid & all 25 currently valid & tumors, burden, doses, terminal outcomes & positive tumor control \\
 \bottomrule
 \end{tabularx}
 \end{table*}
@@ -113,7 +115,7 @@ The \code{discrete\_id} backend maps state $s_t$ to a 716-dimensional one-hot ve
 The adapter emits \code{sofa\_score} from the upstream state metadata at each transition. It defines \code{success} as a positive episode return and retains \code{survived} as a compatibility alias. This is a local reporting convention inherited from the benchmark reward semantics; it does not assert that arbitrary positive returns are calibrated survival probabilities.
 
 \paragraph{ICU behavior policies.}
-The dataset generator can use \code{random\_admissible}, \code{expert}, \code{optimal}, \code{epsilon\_expert}, \code{policy\_checkpoint}, or \code{mixed}. Random samples uniformly among currently admissible actions. Expert samples the upstream expert distribution after renormalizing it on admissible actions. Optimal is obtained by value iteration over the packaged MDP and is deterministic. Epsilon-expert mixes the normalized expert distribution with uniform admissible exploration. A mixed dataset chooses one configured behavior policy per episode according to configured mixture weights. The generator records the probability that actually produced every sampled action, not merely the policy name.
+The dataset generator can use \code{random\_admissible}, \code{expert}, \code{optimal}, \code{epsilon\_expert}, or \code{policy\_checkpoint}. Random samples uniformly among currently admissible actions. Expert samples the upstream expert distribution after renormalizing it on admissible actions. Optimal is obtained by value iteration over the packaged MDP and is deterministic. Epsilon-expert mixes the normalized expert distribution with uniform admissible exploration. The generator records the probability that actually produced every sampled action.
 
 \subsection{EpiCare}
 \label{sec:epicare}
@@ -137,10 +139,37 @@ For treatment $a_t$, the environment first pays a treatment cost. If the action 
 where disease cost is zero in the default \code{use\_disease\_rewards=false} setup. The local adapter reports four transition metrics: \code{symptom\_burden}, the mean of the observed symptom vector; binary \code{remission}; binary \code{adverse\_event}; and \code{time\_to\_remission}, which is $-1$ until remission. An episode succeeds exactly when remission occurs. When no remission occurs, the episode-level time to remission is exported as missing rather than as a false numerical time.
 
 \paragraph{Actions and baselines.}
-Treatment $a\in\{0,\ldots,15\}$ is represented by the scalar integer index and label \code{Treatment <a>}. All treatments are currently marked admissible, so $m_t=\mathbf{1}_{16}$; nevertheless the generic action-mask field is retained so no algorithm needs an EpiCare-specific data path. EpiCare collection can use \code{random}, \code{smart}, \code{soc}, \code{oracle}, or \code{mixed}. Random is uniform. SMART (the local default) uses the ClinicalTrial policy's fixed weighted distribution over treatments, which enforces an 8:1 ratio between the most and least probable treatment. SoC starts from marginal expected-reward values, avoids actions that would increase already high symptoms when possible, and updates its treatment estimates after observed rewards. Oracle selects the highest expected-reward treatment using the latent disease and is therefore a reference upper baseline, not an admissible partially observed deployed policy. In all cases the logged generator samples from the policy's actual categorical distribution and records its exact log propensity.
+Treatment $a\in\{0,\ldots,15\}$ is represented by the scalar integer index and label \code{Treatment <a>}. All treatments are currently marked admissible, so $m_t=\mathbf{1}_{16}$; nevertheless the generic action-mask field is retained so no algorithm needs an EpiCare-specific data path. EpiCare collection can use \code{random}, \code{smart}, \code{soc}, or \code{oracle}. Random is uniform. SMART (the local default) uses the ClinicalTrial policy's fixed weighted distribution over treatments, which enforces an 8:1 ratio between the most and least probable treatment. SoC starts from marginal expected-reward values, avoids actions that would increase already high symptoms when possible, and updates its treatment estimates after observed rewards. Oracle selects the highest expected-reward treatment using the latent disease and is therefore a reference upper baseline, not an admissible partially observed deployed policy. In all cases the logged generator samples from the policy's actual categorical distribution and records its exact log propensity.
 
 \paragraph{Relationship to the EpiCare paper.}
 The source paper evaluates BC, DQN, AWAC, EDAC, TD3+BC, IQL, and CQL, including architecture and history-input choices specific to that study \cite{hargrave2024epicare}. BenchTWM does \emph{not} vendor those implementations or claim their results. It exposes EpiCare to the five local families defined in Section~\ref{sec:methods}. In particular, the local EpiCare input is the current 8-symptom vector; it is not a reproduction of source-paper history augmentation.
+
+\subsection{DTR AhnChemo and GhaffariCancer}
+\label{sec:dtr}
+
+BenchTWM vendors only the two DTRGym ODE runtimes needed for these additions,
+pinned to source commit \code{1f4fed49769b371c01d90959d2e012154068b3be} under
+the upstream MIT license. The other DTRGym environments and global Gym
+registrations are not imported. The public catalog exposes only setting1,
+without PK/PD variation, observation noise, or missingness; settings 2--5 are
+prepared as future variants.
+
+AhnChemo exposes the vector $(T,I,B)$: tumor population, immune population,
+and drug concentration. The normal-cell population $N$ is used by the ODE's
+death condition but is hidden from the agent and from agent-facing
+\code{info}. The native scalar dose in $[0,1]$ is represented by five public
+actions with doses $(0,.25,.5,.75,1)$. Success means reaching horizon
+truncation without death termination.
+
+GhaffariCancer exposes $(T_p,N_p,L_p,C,T_s,N_s,L_s)$ after the runtime's
+natural-log transform with a lower clip at one. The chemotherapy concentration
+and radiation-exposure variables remain hidden ODE state. The public action is
+a row-major $5\times5$ grid with radiotherapy levels
+$(0,2.5,5,7.5,10)$ and chemotherapy levels $(0,2,4,6,8)$. Success is the
+simulator's positive tumor-control termination. Both adapters use only
+\code{state\_vector}, provide all-ones masks, and store a deterministic
+int64 fingerprint of the visible vector solely for audit and trajectory
+bookkeeping.
 
 \section{Offline Dataset Specification}
 \label{sec:data}
@@ -173,7 +202,7 @@ Array & Shape and type & Required & Meaning \\
 \code{actions}, \code{next\_actions} & $(N)$ \code{int64} & yes & Logged categorical action at $t$ and action in the following logged row. \\
 \code{rewards} & $(N)$ \code{float32} & yes & Immediate simulator reward $r_t$. \\
 \code{terminals} & $(N)$ \code{bool} & yes & True when the transition ends or truncates an episode. \\
-\code{state\_ids}, \code{next\_state\_ids} & $(N)$ \code{int64} & yes & Diagnostic simulator state IDs. Not fed to a policy network in EpiCare. \\
+\code{state\_ids}, \code{next\_state\_ids} & $(N)$ \code{int64} & yes & Diagnostic simulator IDs/fingerprints. Not fed to policy or world-model networks in EpiCare or DTR. \\
 \code{action\_masks}, \code{next\_action\_masks} & $(N,A)$ \code{float32} & yes & $0/1$ validity vectors at $t$ and $t+1$. \\
 \code{behavior\_logprobs} & $(N)$ \code{float32} & yes & $\log\behavior(a_t\mid o_t)$ for OPE and logged PPO-style optimization. \\
 \code{behavior\_policy\_ids} & $(N)$ \code{int64} & yes & Integer provenance key, resolved through \code{metadata.json}. \\
@@ -333,7 +362,7 @@ The following metrics are standardized structurally, but not necessarily semanti
     \item \textbf{Mean success}: mean adapter-defined binary success. \code{mean\_survival} remains an alias for compatibility, even for EpiCare; new consumers should use \code{mean\_success}.
     \item \textbf{Mean length}: number of actions before termination or truncation.
     \item \textbf{Action stability}: mean adapter action distance over consecutive decisions. The abrupt-jump rate uses the adapter's own abruptness criterion.
-    \item \textbf{Named environment metrics}: ICU SOFA; EpiCare symptom burden, remission, adverse events, and time to remission. EpiCare evaluation additionally summarizes remission and adverse-event rates when those columns are present.
+    \item \textbf{Named environment metrics}: ICU SOFA; EpiCare symptom burden, remission, adverse events, and time to remission; DTR tumor populations/burden, treatment doses, and terminal outcomes.
 \end{itemize}
 
 Training histories export the canonical \code{success\_rate} and the legacy \code{survival\_rate} alias. Environment metric traces are rectangularized with \code{initial\_}, \code{mean\_}, \code{final\_}, and \code{outcome\_} prefixes, with missing values represented as NaN. Offline histories separately export training/validation losses and any intermediate direct-evaluation values. A direct evaluation should not be compared numerically to OPE: the former calls the true benchmark simulator, while the latter is computed solely from logged trajectories.
@@ -374,7 +403,7 @@ The operational CLI \code{scripts/bench.py} exposes a single offline-first lifec
 \section{Limitations and Non-Claims}
 \label{sec:limitations}
 
-First, shared field names do not imply a shared clinical scale. ICU SOFA and EpiCare symptom burden have different origins, ranges, and meanings. ICU simulated survival and EpiCare simulated remission should never be pooled into one unqualified success number. Second, EpiCare's hidden disease state is intentionally excluded from policy inputs, so a feed-forward symptom-only policy faces partial observability; recurrent history models are not currently implemented. Third, the raw, latent, and reconstructive models are learned one-step predictors with CEM planning, not uncertainty-calibrated causal models. Fourth, IS-family OPE is vulnerable to support mismatch and weight degeneracy, particularly for deterministic targets and multi-step treatment trajectories. Finally, no simulator benchmark, including these source environments, validates a policy for clinical use.
+First, shared field names do not imply a shared clinical scale. ICU SOFA, EpiCare symptom burden, and DTR tumor/dose metrics have different origins, ranges, and meanings. Environment-specific success measures should never be pooled into one unqualified clinical number. Second, EpiCare and the DTR environments intentionally exclude hidden simulator state from policy inputs; recurrent history models are not currently implemented. Third, the raw, latent, and reconstructive models are learned one-step predictors with CEM planning, not uncertainty-calibrated causal models. Fourth, IS-family OPE is vulnerable to support mismatch and weight degeneracy, particularly for deterministic targets and multi-step treatment trajectories. Finally, no simulator benchmark, including these source environments, validates a policy for clinical use.
 
 \begin{thebibliography}{9}
 

@@ -624,11 +624,11 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         policies = args.policies
     elif dataset.env_id == "epicare":
         policies = ["smart", "soc", "random", "oracle"]
+    elif dataset.env_id in {"dtr-ahn-chemo", "dtr-ghaffari-cancer"}:
+        policies = ["random"]
     else:
-        # ICU reference policies are evaluated directly in the simulator; the
-        # mixed collector, its components, and a random admissible policy are
-        # all useful anchors for interpreting a learned policy's return.
-        policies = ["mixed", "expert", "optimal", "random_admissible"]
+        # ICU reference policies are evaluated directly in the simulator.
+        policies = ["expert", "epsilon_expert", "optimal", "random_admissible"]
     summaries = {}
     for name in policies:
         env = make_env(config, obs_backend=config["obs_backend"])
@@ -636,9 +636,14 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
             policy = make_reference_policy(env, name, seed=int(config["seed"]), config=config)
         finally:
             env.close()
+        evaluation_config = {**config, "algo": "baseline", "method_id": name}
+        if dataset.env_id in {"dtr-ahn-chemo", "dtr-ghaffari-cancer"} and name == "random":
+            # ``random`` is a stochastic reference, unlike a learned policy
+            # checkpoint evaluated greedily by default.
+            evaluation_config["eval_deterministic"] = False
         result = evaluate_policy(
             policy,
-            config={**config, "algo": "baseline", "method_id": name},
+            config=evaluation_config,
             num_episodes=args.episodes,
             eval_seed_base=100000,
             output_dir=destination / name,

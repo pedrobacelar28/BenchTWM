@@ -8,7 +8,7 @@
       "seeds": [0, 1, 2]
     },
     {
-      "dataset": "icu-sepsis/mixed/dev",
+      "dataset": "icu-sepsis/expert/dev",
       "methods": ["bc", "dqn", "iql", "cql", "raw-model/continuous-cem", "latent-model/continuous-cem", "reconstructive-model/continuous-cem"],
       "seeds": [0, 1, 2]
     }

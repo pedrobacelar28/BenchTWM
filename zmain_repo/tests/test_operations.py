@@ -24,9 +24,12 @@ class TestOperations(unittest.TestCase):
     def test_catalog_exposes_both_environments_and_clean_recipes(self):
         catalog = Catalog.load()
         self.assertEqual(catalog.validate(), [])
-        self.assertEqual({dataset.env_id for dataset in catalog.datasets}, {"icu_sepsis", "epicare"})
+        self.assertEqual(
+            {dataset.env_id for dataset in catalog.datasets},
+            {"icu_sepsis", "epicare", "dtr-ahn-chemo", "dtr-ghaffari-cancer"},
+        )
         self.assertIn("dqn", [recipe.method_id for recipe in catalog.compatible_methods("epicare/smart/dev")])
-        self.assertIn("raw-model/discrete-cem", [recipe.method_id for recipe in catalog.compatible_methods("icu-sepsis/expert-5k/dev")])
+        self.assertIn("raw-model/discrete-cem", [recipe.method_id for recipe in catalog.compatible_methods("icu-sepsis/expert/dev")])
 
     def test_catalog_materializes_explicit_paths_and_typed_overrides(self):
         catalog = Catalog.load()

@@ -21,7 +21,7 @@ from src.utils.methods import benchmark_track, task_id
 
 PILOT_TASKS = (
     "epicare/smart/dev|obs=state_vector|action=discrete|mode=offline",
-    "icu-sepsis/mixed/dev|obs=state_vector|action=discrete|mode=offline",
+    "icu-sepsis/expert/dev|obs=state_vector|action=discrete|mode=offline",
 )
 PILOT_METHODS = {
     "direct_rl": {"bc", "dqn", "iql", "cql"},

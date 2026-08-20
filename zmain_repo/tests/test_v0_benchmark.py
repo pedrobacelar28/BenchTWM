@@ -19,8 +19,7 @@ def _tiny_icu_dataset(root: Path) -> dict:
     return {
         "dataset_name": "v0_tiny_icu",
         "output_dir": str(root),
-        "behavior_policy": "mixed",
-        "mixed_weights": {"random_admissible": 0.5, "expert": 0.5},
+        "behavior_policy": "expert",
         "env_id": "icu_sepsis",
         "obs_backend": "state_vector",
         "seed": 3,
@@ -85,7 +84,7 @@ class TestV0Benchmark(unittest.TestCase):
     def test_v0_catalog_persists_continuous_task_and_tracks(self):
         catalog = Catalog.load()
         params, _, recipe = catalog.run_config(
-            "icu-sepsis/mixed/dev",
+            "icu-sepsis/expert/dev",
             "bc",
             mode="offline",
             artifact_root="/tmp/benchtwm-v0-test",
@@ -94,9 +93,9 @@ class TestV0Benchmark(unittest.TestCase):
         self.assertEqual(params["obs_backend"], "state_vector")
         self.assertEqual(params["action_type"], "discrete")
         self.assertEqual(params["track"], "direct_rl")
-        self.assertEqual(params["task_id"], "icu-sepsis/mixed/dev|obs=state_vector|action=discrete|mode=offline")
+        self.assertEqual(params["task_id"], "icu-sepsis/expert/dev|obs=state_vector|action=discrete|mode=offline")
         self.assertEqual(recipe.track, "direct_rl")
-        self.assertNotIn("ppo", [item.method_id for item in catalog.compatible_methods("icu-sepsis/mixed/dev")])
+        self.assertNotIn("ppo", [item.method_id for item in catalog.compatible_methods("icu-sepsis/expert/dev")])
 
     def test_discrete_id_compatibility_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,10 @@
 
 ## Source Data Versus Local Datasets
 
+The meaning of each curated behavior-policy variant and of the `dev`/`final`
+tiers is defined in [Curated offline datasets](datasets.md). This page
+specifies the arrays and metadata stored inside each generated dataset.
+
 The upstream ICU-Sepsis package ships a parameterized MDP, not raw patient
 records. Its assets include transition/reward matrices, state cluster centers,
 SOFA scores, and admissible actions. The source paper traces those parameters
@@ -68,7 +72,9 @@ compatibility/ablation backend. Algorithms select the exact view through
 
 `state_ids` are necessary for ICU tabular diagnostics and sequence bookkeeping.
 For EpiCare, they contain the privileged disease identifier but are not passed to
-the MLP agents or treated as an input feature.
+the MLP agents or treated as an input feature. For DTR environments, they are
+deterministic fingerprints of the visible vector only; they are not a tabular
+encoding and never expose the hidden simulator state.
 
 ## Behavior Policies and Propensities
 
@@ -77,8 +83,10 @@ This is required for logged PPO and OPE.
 
 | Environment | Behavior policies |
 |---|---|
-| ICU-Sepsis | `random_admissible`, `expert`, `optimal`, `epsilon_expert`, `mixed`, `policy_checkpoint` |
-| EpiCare | `random`, `smart`, `soc`, `oracle`, `mixed` |
+| ICU-Sepsis | `random_admissible`, `expert`, `optimal`, `epsilon_expert`, `policy_checkpoint` |
+| EpiCare | `random`, `smart`, `soc`, `oracle` |
+| DTR AhnChemo | `random` (`log(1/5)` on every public action) |
+| DTR GhaffariCancer | `random` (`log(1/25)` on every public action) |
 
 EpiCare SMART is the default provided dataset policy. It exposes a nonuniform
 treatment distribution and is sampled directly, so `behavior_logprobs` reflects

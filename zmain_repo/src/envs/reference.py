@@ -52,25 +52,21 @@ class ICUReferencePolicy:
         self.name = str(name)
         self.config = dict(config or {})
         self.rng = np.random.default_rng(seed)
+
+    def bind_env(self, env) -> None:
+        self.env = env
         self.current_policy = self.name
         self.expert_policy = np.asarray(env.env.unwrapped.expert_policy, dtype=np.float64)
         self.optimal_policy = None
-        if self.name in {"optimal", "mixed"} or "optimal" in self.config.get("mixed_weights", {}):
+        if self.name == "optimal":
             from src.offline.generate_dataset import _build_optimal_policy
 
             self.optimal_policy = _build_optimal_policy(env, self.config)
-        if self.name not in {"random_admissible", "expert", "optimal", "mixed", "epsilon_expert"}:
+        if self.name not in {"random_admissible", "expert", "optimal", "epsilon_expert"}:
             raise ValueError(f"Unknown ICU reference policy {self.name!r}")
 
     def reset_episode(self) -> None:
-        if self.name != "mixed":
-            self.current_policy = self.name
-            return
-        weights = self.config.get("mixed_weights", {"expert": 0.4, "optimal": 0.2, "random_admissible": 0.4})
-        names = list(weights)
-        probabilities = np.asarray([weights[item] for item in names], dtype=np.float64)
-        probabilities /= probabilities.sum()
-        self.current_policy = str(self.rng.choice(names, p=probabilities))
+        self.current_policy = self.name
 
     def _stochastic_probabilities(self, info: dict) -> np.ndarray:
         admissible = np.asarray(info["admissible_actions"], dtype=np.int64)
@@ -121,9 +117,43 @@ class ICUReferencePolicy:
         del action, reward
 
 
+class DTRReferencePolicy:
+    """Uniform reference policy for the public DTR action spaces."""
+
+    def __init__(self, env, name: str, *, seed: int = 0):
+        if str(name) != "random":
+            raise ValueError(f"Unknown DTR reference policy {name!r}; expected 'random'")
+        self.env = env
+        self.name = "random"
+        self.rng = np.random.default_rng(seed)
+
+    def reset_episode(self) -> None:
+        return None
+
+    def action_probabilities(self, obs, info, deterministic: bool = True) -> np.ndarray:
+        del obs
+        probabilities = np.zeros(self.env.num_actions, dtype=np.float64)
+        admissible = np.asarray(info["admissible_actions"], dtype=np.int64)
+        probabilities[admissible] = 1.0 / max(1, len(admissible))
+        if not deterministic:
+            return probabilities
+        result = np.zeros_like(probabilities)
+        result[int(admissible[0])] = 1.0
+        return result
+
+    def act(self, obs, info, deterministic: bool = True) -> int:
+        probabilities = self.action_probabilities(obs, info, deterministic=deterministic)
+        return int(np.argmax(probabilities) if deterministic else self.rng.choice(len(probabilities), p=probabilities))
+
+    def observe(self, action: int, reward: float) -> None:
+        del action, reward
+
+
 def make_reference_policy(env, name: str, *, seed: int = 0, config: dict | None = None):
     if env.spec.env_id == "epicare":
         return EpiCareReferencePolicy(env, name, seed=seed)
     if env.spec.env_id == "icu_sepsis":
         return ICUReferencePolicy(env, name, seed=seed, config=config)
+    if str(env.spec.env_id).startswith("dtr-"):
+        return DTRReferencePolicy(env, name, seed=seed)
     raise ValueError(f"Environment {env.spec.env_id!r} has no generic reference policy {name!r}")

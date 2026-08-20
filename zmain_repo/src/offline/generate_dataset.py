@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from collections import Counter
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def _build_optimal_policy(env, config: dict) -> np.ndarray:
 
 
 def _load_checkpoint_policy(config: dict):
-    if config.get("behavior_policy") != "policy_checkpoint" and "policy_checkpoint" not in config.get("mixed_weights", {}):
+    if config.get("behavior_policy") != "policy_checkpoint":
         return None
     policy_config_raw = load_json(config["policy_config_path"])
     policy_index = int(config.get("policy_config_index", 0))
@@ -97,19 +98,11 @@ class BehaviorPolicy:
         self.optimal_policy = None
         self.checkpoint_policy = _load_checkpoint_policy(config)
         policies = {str(config["behavior_policy"])}
-        policies.update(str(key) for key in config.get("mixed_weights", {}).keys())
         if "optimal" in policies:
             self.optimal_policy = _build_optimal_policy(env, config)
 
     def choose_episode_policy(self) -> str:
-        policy = str(self.config["behavior_policy"])
-        if policy != "mixed":
-            return policy
-        weights = self.config.get("mixed_weights", {"random_admissible": 0.34, "expert": 0.33, "optimal": 0.33})
-        names = list(weights.keys())
-        probs = np.asarray([weights[name] for name in names], dtype=np.float64)
-        probs = probs / probs.sum()
-        return str(self.rng.choice(names, p=probs))
+        return str(self.config["behavior_policy"])
 
     def start_episode(self, episode_policy: str) -> None:
         del episode_policy
@@ -165,24 +158,14 @@ class EpiCareBehaviorPolicy:
             "oracle": Oracle,
         }
         requested = {str(config["behavior_policy"])}
-        requested.update(str(key) for key in config.get("mixed_weights", {}).keys())
-        unsupported = sorted(requested - set(factories) - {"mixed"})
+        unsupported = sorted(requested - set(factories))
         if unsupported:
             raise ValueError(f"Unsupported EpiCare behavior policies: {unsupported}")
-        self.policies = {name: factories[name](env.env) for name in requested if name != "mixed"}
+        self.policies = {name: factories[name](env.env) for name in requested}
         self.current_policy = None
 
     def choose_episode_policy(self) -> str:
-        policy = str(self.config["behavior_policy"])
-        if policy != "mixed":
-            return policy
-        weights = self.config.get("mixed_weights")
-        if not weights:
-            raise ValueError("EpiCare mixed behavior requires mixed_weights")
-        names = list(weights)
-        probs = np.asarray([weights[name] for name in names], dtype=np.float64)
-        probs /= probs.sum()
-        return str(self.rng.choice(names, p=probs))
+        return str(self.config["behavior_policy"])
 
     def start_episode(self, episode_policy: str) -> None:
         self.current_policy = self.policies[episode_policy]
@@ -201,8 +184,42 @@ class EpiCareBehaviorPolicy:
             self.current_policy.update(int(action), float(reward))
 
 
+class DTRRandomBehaviorPolicy:
+    """Uniform policy over the public DTR action grid with exact propensities."""
+
+    def __init__(self, config: dict, env):
+        self.config = config
+        self.rng = np.random.default_rng(int(config["seed"]))
+        self.num_actions = int(env.num_actions)
+        if str(config["behavior_policy"]) != "random":
+            raise ValueError("DTR datasets currently support behavior_policy='random' only")
+
+    def choose_episode_policy(self) -> str:
+        return "random"
+
+    def start_episode(self, episode_policy: str) -> None:
+        if episode_policy != "random":
+            raise ValueError(f"Unsupported DTR episode policy {episode_policy!r}")
+
+    def action(self, episode_policy: str, obs, info: dict) -> tuple[int, float, int]:
+        del obs
+        if episode_policy != "random":
+            raise ValueError(f"Unsupported DTR episode policy {episode_policy!r}")
+        admissible = list(info["admissible_actions"])
+        probs = _uniform_admissible_probs(self.num_actions, admissible)
+        action, logprob = _sample_from_probs(self.rng, probs)
+        return action, logprob, POLICY_IDS["random"]
+
+    def observe(self, action: int, reward: float) -> None:
+        del action, reward
+
+
 def _make_behavior(config: dict, env):
-    return EpiCareBehaviorPolicy(config, env) if env.spec.env_id == "epicare" else BehaviorPolicy(config, env)
+    if env.spec.env_id == "epicare":
+        return EpiCareBehaviorPolicy(config, env)
+    if str(env.spec.env_id).startswith("dtr-"):
+        return DTRRandomBehaviorPolicy(config, env)
+    return BehaviorPolicy(config, env)
 
 
 def _empty_buffers(metric_names: tuple[str, ...]) -> dict[str, list]:
@@ -364,6 +381,14 @@ def _save_split(path: Path, buffers: dict[str, list]) -> dict:
     }
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _summary_stats(summaries: list[dict]) -> dict:
     df = pd.DataFrame(summaries)
     policy_counts = Counter(df["behavior_policy"].tolist()) if not df.empty else Counter()
@@ -397,7 +422,12 @@ def generate_dataset(config: dict) -> dict:
     # Canonical catalog recipes set state_vector explicitly.  Keep the legacy
     # ICU default discrete_id for callers that construct a minimal config and
     # rely on the compatibility schema.
-    obs_backend = str(config.get("obs_backend", "state_vector" if env_id == "epicare" else "discrete_id"))
+    obs_backend = str(
+        config.get(
+            "obs_backend",
+            "state_vector" if env_id in {"epicare", "dtr-ahn-chemo", "dtr-ghaffari-cancer"} else "discrete_id",
+        )
+    )
     env = make_env(config, obs_backend=obs_backend, seed=int(config["seed"]))
     behavior = _make_behavior(config, env)
     train_buffers, train_summaries = _collect_split(
@@ -453,6 +483,7 @@ def generate_dataset(config: dict) -> dict:
             "state_vector_dim": int(env.spec.state_vector_dim),
             "feature_names": list(env.spec.feature_names),
             "source": "environment.state_vector" if obs_backend == "state_vector" else "environment.state_id_one_hot",
+            **({"transform": dict(getattr(env, "observation_transform", {}))} if hasattr(env, "observation_transform") else {}),
         },
         "action": {
             "type": "discrete",
@@ -466,6 +497,14 @@ def generate_dataset(config: dict) -> dict:
         **({"ope_test": {**ope_meta, **_summary_stats(ope_summaries)}} if ope_meta is not None else {}),
         "episodes_summary_path": str(episodes_path),
     }
+    runtime_metadata = getattr(env, "runtime_metadata", None)
+    if runtime_metadata:
+        metadata["runtime"] = dict(runtime_metadata)
+        metadata["file_hashes"] = {
+            "train.npz": _sha256_file(train_path),
+            "val.npz": _sha256_file(val_path),
+            **({"ope_test.npz": _sha256_file(ope_path)} if ope_path is not None and ope_path.exists() else {}),
+        }
     save_json(metadata, metadata_path)
     if not bool(config.get("quiet", False)):
         print(f"Saved dataset under {output_dir}")

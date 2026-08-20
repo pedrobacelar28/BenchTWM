@@ -1,12 +1,14 @@
 {
   "behavior_policy": "random_admissible",
-  "dataset_name": "icu_sepsis_random_dev",
+  "dataset_name": "icu_sepsis_random_dev_5000",
   "env_id": "icu_sepsis",
   "env_kwargs": {},
   "environment_seed": 1,
   "gamma": 1.0,
+  "num_ope_episodes": 500,
   "num_train_episodes": 5000,
   "num_val_episodes": 500,
+  "ope_enabled": true,
   "overwrite": false,
   "schema_version": 1,
   "seed": 0

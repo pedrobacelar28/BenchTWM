@@ -1,0 +1,11 @@
+DTRGym selective runtime
+
+Source: https://github.com/GilesLuo/DTRGym
+Source commit: 1f4fed49769b371c01d90959d2e012154068b3be
+Source version: 0.1.0 (2024-03-19)
+Vendored files: DTRGym/ahn_chemo_env.py and DTRGym/ghaffari_cancer_env.py,
+with imports adapted to this isolated runtime and an optional numba fallback.
+Unused DTRGym environments and global registrations are intentionally omitted.
+
+The upstream project is distributed under the MIT License.  The license text
+is retained in this repository as third_party/dtr/LICENSE.

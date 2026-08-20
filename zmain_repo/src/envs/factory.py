@@ -8,6 +8,12 @@ ENV_ALIASES = {
     "icu": "icu_sepsis",
     "icu_sepsis": "icu_sepsis",
     "epicare": "epicare",
+    "dtr-ahn-chemo": "dtr-ahn-chemo",
+    "dtr_ahn_chemo": "dtr-ahn-chemo",
+    "ahn_chemo": "dtr-ahn-chemo",
+    "dtr-ghaffari-cancer": "dtr-ghaffari-cancer",
+    "dtr_ghaffari_cancer": "dtr-ghaffari-cancer",
+    "ghaffari_cancer": "dtr-ghaffari-cancer",
 }
 
 
@@ -39,6 +45,18 @@ def make_env(
             seed=seed,
             params=params if params is not None else kwargs or None,
         )
+    if env_id == "dtr-ahn-chemo":
+        from src.envs.dtr_adapter import DTRAhnChemoEnvWrapper
+
+        if backend != "state_vector":
+            raise ValueError("DTR AhnChemo only supports obs_backend='state_vector'")
+        return DTRAhnChemoEnvWrapper(seed=seed, **kwargs)
+    if env_id == "dtr-ghaffari-cancer":
+        from src.envs.dtr_adapter import DTRGhaffariCancerEnvWrapper
+
+        if backend != "state_vector":
+            raise ValueError("DTR GhaffariCancer only supports obs_backend='state_vector'")
+        return DTRGhaffariCancerEnvWrapper(seed=seed, **kwargs)
     from src.envs.epicare_adapter import EpiCareEnvWrapper
 
     return EpiCareEnvWrapper(

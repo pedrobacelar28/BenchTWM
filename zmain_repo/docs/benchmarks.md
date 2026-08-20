@@ -13,8 +13,18 @@ The public tasks are:
 
 ```text
 epicare/smart/dev|obs=state_vector|action=discrete|mode=offline
-icu-sepsis/mixed/dev|obs=state_vector|action=discrete|mode=offline
+icu-sepsis/expert/dev|obs=state_vector|action=discrete|mode=offline
 ```
+
+The catalog also provides one `dev` and one `final` dataset for each curated
+behavior variant. EpiCare provides `random`, `smart`, `soc`, and `oracle`;
+ICU-Sepsis provides `random`, `expert`, `epsilon-expert`, and `optimal`. The
+catalog additionally provides `setting1/random` `dev` and `final` datasets for
+`dtr-ahn-chemo` and `dtr-ghaffari-cancer`; these are additive environment
+families and are not mixed into the original pilot task list. The
+pilot matrix above selects one representative development task per
+environment; the other catalog entries are distribution and reference-policy
+variants, not additional environment families.
 
 `state_vector` is a `float32` vector whose feature names and source dimension
 are recorded in `metadata.json`. `state_id` remains in every transition for
@@ -27,12 +37,13 @@ The public tracks are `direct_rl` (BC, fitted/offline DQN, IQL, CQL),
 placeholders), and the reserved `published_planning` track. Each method uses
 seeds `0, 1, 2`, batch 256, 5,000 optimization steps (1,280,000 sampled
 transitions), validation every 250 steps, and a final 500-episode evaluation.
-EpiCare additionally has held-out OPE; ICU is evaluated directly in the
-simulator. Intermediate simulator evaluation is disabled.
+All public datasets have held-out OPE available. ICU is still evaluated
+directly in the simulator as the primary result, while OPE remains a separate
+diagnostic evidence stream. Intermediate simulator evaluation is disabled.
 
 The question is whether planning's return/success improvement compensates for
 its training, inference, and planner-call cost relative to the best direct
-baseline on the same task. ICU-Sepsis and EpiCare are never averaged together.
+baseline on the same task. Environment families are never averaged together.
 
 ## Source Material and Scope
 
@@ -94,6 +105,23 @@ Transition metrics are `symptom_burden`, `remission`, `adverse_event`, and
 also reports remission/adverse-event rates and time to remission among remitted
 episodes. EpiCare action distance is categorical: zero for equal treatments and
 one otherwise.
+
+## DTR AhnChemo and GhaffariCancer
+
+The DTR additions use the ODE implementations from the pinned selective
+runtime in `third_party/dtr/`. They are integrated through the same adapter
+contract and use only `state_vector` observations.
+
+| Environment | Public features | Action contract | Hidden state excluded from the agent |
+|---|---|---|---|
+| `dtr-ahn-chemo` | `(tumor, immune, drug)` as `float32[3]` | Five ordinal dose bins; dose `i` maps to `i/4` in the native `[0,1]` range | Normal-cell population and all other full-state fields |
+| `dtr-ghaffari-cancer` | Seven `float32` features `(T_p,N_p,L_p,C,T_s,N_s,L_s)` after natural log and lower clipping at 1 | Row-major 5×5 grid: radiotherapy `[0, 2.5, 5, 7.5, 10]`, chemotherapy `[0, 2, 4, 6, 8]` | Metastasis timing, drug concentration, radiation-exposure auxiliaries, and ODE parameters |
+
+All actions are valid in the initial public settings. AhnChemo success means
+the episode reaches horizon truncation without the simulator's death
+termination. GhaffariCancer success means the simulator reaches its positive
+tumor-control termination. The adapters report tumor burden, doses, terminal
+outcomes, return, and duration without adding clinical normalizations.
 
 ## Shared Adapter Interface
 
