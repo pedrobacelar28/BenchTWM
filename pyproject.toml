@@ -22,6 +22,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 
+[project.scripts]
+bench = "benchtwm.cli:main"
+
 [tool.setuptools.packages.find]
 # The vendored benchmark cores are installed as top-level packages next to
 # benchtwm, straight from third_party/, so no sys.path manipulation is needed.

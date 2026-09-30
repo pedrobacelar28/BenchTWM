@@ -1,0 +1,35 @@
+{
+  "env_id": "epicare",
+  "seed": 0,
+  "ope_enabled": true,
+  "tiers": {
+    "dev": {
+      "num_train_episodes": 1000,
+      "num_val_episodes": 200,
+      "num_ope_episodes": 500
+    },
+    "final": {
+      "num_train_episodes": 100000,
+      "num_val_episodes": 10000,
+      "num_ope_episodes": 20000
+    }
+  },
+  "behaviors": {
+    "random": {
+      "behavior_policy": "random",
+      "description": "Uniform over the 16 treatments: coverage-oriented lower reference."
+    },
+    "smart": {
+      "behavior_policy": "smart",
+      "description": "EpiCare ClinicalTrial policy, a nonuniform stochastic treatment distribution: the main behavior dataset."
+    },
+    "soc": {
+      "behavior_policy": "soc",
+      "description": "Standard of Care: adaptive and deterministic, a narrow-support stress test."
+    },
+    "oracle": {
+      "behavior_policy": "oracle",
+      "description": "Selects with the hidden disease state: privileged reference, not a deployable policy."
+    }
+  }
+}

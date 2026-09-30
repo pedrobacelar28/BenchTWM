@@ -70,11 +70,8 @@ class DreamerSequenceStream:
         self.cycle = bool(cycle)
         self.num_actions = dataset.num_actions
         self.obs_dim = dataset.obs_dim
-        self.num_state_records = int(sum(len(indices) + 1 for indices in dataset._episode_indices))
-        self._episodes = [
-            indices[np.argsort(dataset.data["timesteps"][indices], kind="stable")]
-            for indices in dataset._episode_indices
-        ]
+        self.num_state_records = int(sum(len(indices) + 1 for indices in dataset.episode_indices))
+        self._episodes = dataset.episode_indices
         self.reset()
 
     def reset(self) -> None:
@@ -110,7 +107,7 @@ class DreamerSequenceStream:
         if cursor == 0:
             first = int(indices[0])
             return (
-                np.asarray(self.dataset._obs_array("obs")[first], dtype=np.float32),
+                np.asarray(self.dataset.observations[first], dtype=np.float32),
                 int(data["actions"][first]),
                 0.0,
                 True,
@@ -130,7 +127,7 @@ class DreamerSequenceStream:
             action_mask = np.asarray(data["action_masks"][current], dtype=np.float32)
         terminal = bool(data["terminals"][previous]) if final else False
         return (
-            np.asarray(self.dataset._obs_array("next_obs")[previous], dtype=np.float32),
+            np.asarray(self.dataset.next_observations[previous], dtype=np.float32),
             action,
             float(data["rewards"][previous]),
             False,

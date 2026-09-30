@@ -1,0 +1,11 @@
+{
+  "slug": "icu-sepsis",
+  "label": "ICU-Sepsis",
+  "description": "Tabular ICU sepsis-treatment MDP estimated from MIMIC-III; 47 named state features, 5x5 fluid/vasopressor actions with admissibility masks.",
+  "action_type": "discrete",
+  "run": {
+    "env_kwargs": {},
+    "environment_seed": 1,
+    "gamma": 1.0
+  }
+}

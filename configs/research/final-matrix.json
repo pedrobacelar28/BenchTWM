@@ -1,0 +1,18 @@
+{
+  "description": "Every method on every behavior dataset of each environment (final tier), three seeds.",
+  "datasets": [
+    "epicare/random/final",
+    "epicare/smart/final",
+    "epicare/soc/final",
+    "epicare/oracle/final",
+    "icu-sepsis/random/final",
+    "icu-sepsis/expert/final",
+    "icu-sepsis/epsilon-expert/final",
+    "icu-sepsis/optimal/final"
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ]
+}

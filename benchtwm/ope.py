@@ -35,13 +35,12 @@ def _episodes(
         disable=not show_progress,
     )
     try:
-        for indices in dataset._episode_indices:
+        for order in dataset.episode_indices:
             policy.reset_episode()
-            order = indices[np.argsort(data["timesteps"][indices], kind="stable")]
             rewards = []
             ratios = []
             for index in order:
-                obs = dataset._obs_array("obs")[index]
+                obs = dataset.observations[index]
                 mask = data["action_masks"][index]
                 info = {"action_mask": mask, "admissible_actions": np.flatnonzero(mask > 0).tolist(), "state_id": int(data["state_ids"][index])}
                 action = int(data["actions"][index])

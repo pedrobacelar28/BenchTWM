@@ -1,0 +1,13 @@
+{
+  "slug": "epicare",
+  "label": "EpiCare",
+  "description": "Procedural longitudinal-treatment POMDP; 8 observed symptom intensities, 16 treatments, hidden disease state.",
+  "action_type": "discrete",
+  "run": {
+    "env_kwargs": {
+      "patient_modifiers": true
+    },
+    "environment_seed": 1,
+    "gamma": 1.0
+  }
+}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import statistics
 import subprocess
 import sys
 import time
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from benchtwm.operations.artifacts import artifact_root, is_complete, write_manifest
+from benchtwm.operations.summary import run_row, summarize
 from benchtwm.utils.io import ensure_dir, load_json, save_json
 from benchtwm.utils.queue_progress import read_progress, update_progress
 
@@ -32,6 +32,7 @@ class QueueJob:
     manifest: dict[str, Any]
     device: str = "auto"
     force: bool = False
+    ready: bool = True
     progress_path: str | None = None
 
 
@@ -44,138 +45,26 @@ def _write_queue_manifest(queue_dir: Path, payload: dict[str, Any]) -> None:
 
 
 def _write_suite_results(queue_dir: Path, manifest: dict[str, Any]) -> Path:
-    """Persist a central, queue-level view of all jobs and their results."""
-
-    def optional_json(path: Path) -> dict[str, Any]:
-        try:
-            value = load_json(path)
-        except (FileNotFoundError, OSError, ValueError):
-            return {}
-        return value if isinstance(value, dict) else {}
+    """Persist a queue-level view of every job, its results, and the planning gain."""
 
     jobs: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for record in manifest.get("jobs", []):
         output_dir = Path(record["output_dir"])
-        run_manifest = optional_json(output_dir / "run_manifest.json")
-        config = optional_json(output_dir / "config.json")
-        metrics = optional_json(output_dir / "metrics_summary.json")
-        direct_evaluation = optional_json(output_dir / "eval_summary.json") or metrics.get("eval_summary", {})
-        ope = optional_json(output_dir / "ope_summary.json")
+        run_manifest = _optional_json(output_dir / "run_manifest.json")
+        row = run_row(output_dir, run_manifest) if run_manifest else None
+        if row is not None and record.get("status") in {"completed", "skipped"}:
+            rows.append(row)
         jobs.append(
             {
-                "name": record.get("name"),
-                "status": record.get("status"),
-                "returncode": record.get("returncode"),
-                "started_at": record.get("started_at"),
-                "finished_at": record.get("finished_at"),
-                "gpu": record.get("gpu"),
-                "run_id": record.get("run_id") or run_manifest.get("run_id"),
-                "dataset_id": record.get("dataset_id") or run_manifest.get("dataset_id") or config.get("dataset_id"),
-                "task_id": record.get("task_id") or run_manifest.get("task_id") or config.get("task_id"),
-                "method_id": record.get("method_id") or run_manifest.get("method_id") or config.get("method_id"),
-                "track": record.get("track") or run_manifest.get("track") or config.get("track"),
-                "environment": record.get("environment") or run_manifest.get("environment") or config.get("env_id"),
-                "mode": record.get("mode") or run_manifest.get("train_mode") or config.get("train_mode"),
-                "seed": record.get("seed", run_manifest.get("seed", config.get("seed"))),
-                "observation_backend": record.get("observation_backend") or config.get("obs_backend"),
-                "action_type": record.get("action_type") or config.get("action_type"),
+                **{key: record.get(key) for key in ("name", "status", "returncode", "started_at", "finished_at", "gpu", "log_path", "progress_path")},
+                **{key: record.get(key) or run_manifest.get(key) for key in ("run_id", "dataset_id", "env_id", "method_id", "family", "seed")},
                 "output_dir": str(output_dir),
-                "log_path": record.get("log_path"),
-                "progress_path": record.get("progress_path"),
                 "progress": read_progress(record.get("progress_path")),
-                "run_manifest": run_manifest,
-                "config": config,
-                "metrics_summary": metrics,
-                "optimization": metrics.get("train_summary", {}),
-                "direct_evaluation": direct_evaluation,
-                "timing": metrics.get("timing_summary", {}),
-                "ope": ope,
+                "direct_evaluation": _optional_json(output_dir / "eval_summary.json"),
+                "ope": (_optional_json(output_dir / "metrics_summary.json").get("ope_summary") or {}),
             }
         )
-
-    def numeric(values: list[Any]) -> list[float]:
-        return [float(value) for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)]
-
-    def aggregate(values: list[Any]) -> tuple[float | None, float | None]:
-        numbers = numeric(values)
-        if not numbers:
-            return None, None
-        return float(statistics.fmean(numbers)), float(statistics.stdev(numbers)) if len(numbers) > 1 else 0.0
-
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for job in jobs:
-        evaluation = job.get("direct_evaluation") or {}
-        if job.get("status") not in {"completed", "skipped"} or not isinstance(evaluation.get("mean_return"), (int, float)):
-            continue
-        key = (str(job.get("task_id") or ""), str(job.get("method_id") or ""), str(job.get("track") or ""))
-        grouped.setdefault(key, []).append(job)
-
-    method_summary: list[dict[str, Any]] = []
-    for (task_id, method_id, track), group in sorted(grouped.items()):
-        returns = aggregate([(job.get("direct_evaluation") or {}).get("mean_return") for job in group])
-        successes = aggregate([(job.get("direct_evaluation") or {}).get("mean_success") for job in group])
-        lengths = aggregate([(job.get("direct_evaluation") or {}).get("mean_length") for job in group])
-        latencies = aggregate([(job.get("direct_evaluation") or {}).get("mean_action_latency_ms") for job in group])
-        optimization_times = aggregate([(job.get("timing") or {}).get("optimization_seconds") for job in group])
-        evaluation_times = aggregate([(job.get("timing") or {}).get("evaluation_seconds") for job in group])
-        planner_calls = aggregate([(job.get("direct_evaluation") or {}).get("planner_calls") for job in group])
-        planner_evaluations = aggregate([(job.get("direct_evaluation") or {}).get("planner_model_evaluations") for job in group])
-        method_summary.append(
-            {
-                "task_id": task_id,
-                "method_id": method_id,
-                "track": track,
-                "seeds": sorted({int(job["seed"]) for job in group if isinstance(job.get("seed"), int)}),
-                "num_runs": len(group),
-                "mean_return_mean": returns[0],
-                "mean_return_std": returns[1],
-                "mean_success_mean": successes[0],
-                "mean_success_std": successes[1],
-                "mean_length_mean": lengths[0],
-                "mean_length_std": lengths[1],
-                "mean_action_latency_ms_mean": latencies[0],
-                "mean_action_latency_ms_std": latencies[1],
-                "optimization_seconds_mean": optimization_times[0],
-                "optimization_seconds_std": optimization_times[1],
-                "evaluation_seconds_mean": evaluation_times[0],
-                "evaluation_seconds_std": evaluation_times[1],
-                "planner_calls_mean": planner_calls[0],
-                "planner_calls_std": planner_calls[1],
-                "planner_model_evaluations_mean": planner_evaluations[0],
-                "planner_model_evaluations_std": planner_evaluations[1],
-            }
-        )
-
-    best_direct: dict[str, dict[str, Any]] = {}
-    for item in method_summary:
-        if item["track"] != "direct_rl" or item["mean_return_mean"] is None:
-            continue
-        current = best_direct.get(item["task_id"])
-        if current is None or item["mean_return_mean"] > current["mean_return_mean"]:
-            best_direct[item["task_id"]] = {
-                "method_id": item["method_id"],
-                "track": item["track"],
-                "mean_return_mean": item["mean_return_mean"],
-                "mean_success_mean": item["mean_success_mean"],
-                "num_runs": item["num_runs"],
-            }
-
-    planning_gain: list[dict[str, Any]] = []
-    for item in method_summary:
-        baseline = best_direct.get(item["task_id"])
-        if item["track"] != "provisional_planning" or baseline is None:
-            continue
-        planning_gain.append(
-            {
-                "task_id": item["task_id"],
-                "method_id": item["method_id"],
-                "track": item["track"],
-                "best_direct_method_id": baseline["method_id"],
-                "planning_gain_return": item["mean_return_mean"] - baseline["mean_return_mean"],
-                "planning_gain_success": item["mean_success_mean"] - baseline["mean_success_mean"],
-            }
-        )
-
     statuses = [str(job.get("status")) for job in jobs]
     if manifest.get("finished_at"):
         suite_status = "completed" if int(manifest.get("failures", 0)) == 0 else "failed"
@@ -183,42 +72,38 @@ def _write_suite_results(queue_dir: Path, manifest: dict[str, Any]) -> Path:
         suite_status = "running"
     else:
         suite_status = "planned"
+    summary = summarize(rows)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "suite": {
             "queue_id": manifest.get("queue_id"),
             "status": suite_status,
             "created_at": manifest.get("created_at"),
             "started_at": manifest.get("started_at"),
             "finished_at": manifest.get("finished_at"),
-            "dataset_ids": sorted({str(job.get("dataset_id")) for job in jobs if job.get("dataset_id")}),
-            "task_ids": sorted({str(job.get("task_id")) for job in jobs if job.get("task_id")}),
-            "modes": sorted({str(job.get("mode")) for job in jobs if job.get("mode")}),
+            "dataset_ids": sorted({str(job["dataset_id"]) for job in jobs if job.get("dataset_id")}),
             "max_workers": manifest.get("max_workers"),
             "gpus": manifest.get("gpus", []),
         },
-        "counts": {
-            "total": len(jobs),
-            "pending": statuses.count("pending"),
-            "running": statuses.count("running"),
-            "completed": statuses.count("completed"),
-            "skipped": statuses.count("skipped"),
-            "failed": statuses.count("failed"),
-        },
+        "counts": {"total": len(jobs), **{status: statuses.count(status) for status in ("pending", "running", "completed", "skipped", "failed")}},
         "jobs": jobs,
-        "method_summary": method_summary,
-        "best_direct_rl": best_direct,
-        "planning_gain": planning_gain,
-        "artifacts": {
-            "queue_manifest": str(queue_dir / "queue_manifest.json"),
-            "suite_results": str(queue_dir / "suite_results.json"),
-        },
+        "method_summary": summary["aggregate"],
+        "best_model_free": summary["best_model_free"],
+        "planning_gain": summary["planning_gain"],
     }
     destination = queue_dir / "suite_results.json"
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     save_json(payload, temporary)
     temporary.replace(destination)
     return destination
+
+
+def _optional_json(path: Path) -> dict[str, Any]:
+    try:
+        value = load_json(path)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 class _FollowDisplay:
@@ -258,7 +143,7 @@ class _FollowDisplay:
             step = snapshot.get("step")
             total = snapshot.get("total_steps")
             if self._rich_progress is not None:
-                task_id = self._tasks[index]
+                bar = self._tasks[index]
                 description = f"{record['name']} [{status}/{phase}]"
                 kwargs: dict[str, Any] = {"description": description}
                 if isinstance(total, (int, float)) and total > 0:
@@ -267,7 +152,7 @@ class _FollowDisplay:
                 elif status in {"completed", "skipped", "failed"}:
                     kwargs["total"] = 1
                     kwargs["completed"] = 1
-                self._rich_progress.update(task_id, **kwargs)
+                self._rich_progress.update(bar, **kwargs)
                 continue
             signature = (status, phase, step, total)
             if self._fallback_seen.get(index) == signature:
@@ -337,16 +222,7 @@ def execute_queue(
             "status": status,
             "log_path": str(logs_dir / f"{index:03d}.log"),
             "progress_path": str(progress_path),
-            "run_id": job.manifest.get("run_id"),
-            "dataset_id": job.manifest.get("dataset_id") or job.params.get("dataset_id"),
-            "task_id": job.manifest.get("task_id") or job.params.get("task_id"),
-            "method_id": job.manifest.get("method_id") or job.params.get("method_id"),
-            "track": job.manifest.get("track") or job.params.get("track"),
-            "environment": job.manifest.get("environment") or job.params.get("env_id"),
-            "mode": job.manifest.get("train_mode") or job.params.get("train_mode"),
-            "seed": job.manifest.get("seed", job.params.get("seed")),
-            "observation_backend": job.params.get("obs_backend"),
-            "action_type": job.params.get("action_type"),
+            **{key: job.manifest.get(key) for key in ("run_id", "dataset_id", "env_id", "method_id", "family", "seed")},
         }
         records.append(record)
         job_path = jobs_dir / f"{index:03d}.json"

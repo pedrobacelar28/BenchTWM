@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from benchtwm.operations.artifacts import artifact_root, load_manifest
+from benchtwm.operations.artifacts import artifact_root, effective_status, load_manifest, manifest_family
 from benchtwm.utils.io import ensure_dir, load_json, save_json
 
 
@@ -27,12 +27,11 @@ def build_run_report(run_dir: str | Path, *, root: str | Path | None = None) -> 
         "created_at": datetime.now(timezone.utc).isoformat(),
         "run": {
             "run_id": manifest.get("run_id"),
-            "status": manifest.get("status"),
+            "status": effective_status(manifest),
             "dataset_id": manifest.get("dataset_id"),
-            "task_id": manifest.get("task_id"),
             "method_id": manifest.get("method_id"),
-            "track": manifest.get("track"),
-            "environment": manifest.get("environment"),
+            "family": manifest_family(manifest),
+            "environment": manifest.get("env_id") or manifest.get("environment"),
             "seed": manifest.get("seed"),
             "artifact_dir": str(run_dir),
         },
@@ -48,9 +47,8 @@ def build_run_report(run_dir: str | Path, *, root: str | Path | None = None) -> 
         "## Identity",
         f"- Status: `{summary['run']['status']}`",
         f"- Dataset: `{summary['run']['dataset_id']}`",
-        f"- Task: `{summary['run']['task_id']}`",
         f"- Method: `{summary['run']['method_id']}`",
-        f"- Track: `{summary['run']['track']}`",
+        f"- Family: `{summary['run']['family']}`",
         f"- Environment: `{summary['run']['environment']}`",
         f"- Seed: `{summary['run']['seed']}`",
         "",

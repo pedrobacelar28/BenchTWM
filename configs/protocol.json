@@ -1,0 +1,21 @@
+{
+  "description": "Offline protocol shared by every run. Layers applied afterwards: configs/algorithms/<algo>.json, configs/envs/<env>.json (run), configs/overrides/<env>/<algo>.json, then CLI --set. In any layer, a 'tiers' object holds values that apply only to that dataset tier.",
+  "offline_train_steps": 5000,
+  "offline_batch_size": 256,
+  "offline_log_interval": 250,
+  "early_stopping_patience": 20,
+  "early_stopping_min_delta": 0.0,
+  "max_grad_norm": 10.0,
+  "eval_episodes": 500,
+  "eval_seed_base": 100000,
+  "eval_deterministic": true,
+  "save_trajectories": true,
+  "tiers": {
+    "dev": {
+      "ope_bootstrap_replicates": 100
+    },
+    "final": {
+      "ope_bootstrap_replicates": 200
+    }
+  }
+}

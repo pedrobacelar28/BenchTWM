@@ -58,7 +58,7 @@ def test_train_load_and_act_within_mask(algo, env_id, tiny_datasets):
 @pytest.mark.parametrize("algo", ALGORITHMS)
 def test_runner_writes_every_artifact(algo, tiny_datasets, tmp_path):
     config = tiny_run_config(algo, "icu_sepsis", tiny_datasets["icu_sepsis"], dataset_id="test/icu", method_id=get_algorithm(algo).method_id)
-    manifest = initial_manifest(config, dataset_id="test/icu", method_id=config["method_id"], run_dir=tmp_path)
+    manifest = initial_manifest(config, run_dir=tmp_path)
     run_dir = run_experiment(config, output_dir=tmp_path / "run", manifest=manifest, quiet=True)
     for name in ("config.json", "run_manifest.json", "train_history.csv", "checkpoint_best.pt", "checkpoint_last.pt", "eval_summary.json",
                  "episodes_summary.csv", "trajectories.csv", "environment_spec.json", "ope_summary.json", "ope_bootstrap.csv", "metrics_summary.json"):
@@ -73,8 +73,8 @@ def test_runner_writes_every_artifact(algo, tiny_datasets, tmp_path):
 
 
 def test_failed_run_is_recorded(tiny_datasets, tmp_path):
-    config = tiny_run_config("dqn", "icu_sepsis", tiny_datasets["icu_sepsis"], dataset_path=str(tmp_path / "missing.npz"))
-    manifest = initial_manifest(config, dataset_id="test/icu", method_id="dqn", run_dir=tmp_path)
+    config = tiny_run_config("dqn", "icu_sepsis", tiny_datasets["icu_sepsis"], dataset_path=str(tmp_path / "missing.npz"), dataset_id="test/icu", method_id="dqn")
+    manifest = initial_manifest(config, run_dir=tmp_path)
     with pytest.raises(FileNotFoundError):
         run_experiment(config, output_dir=tmp_path / "run", manifest=manifest, quiet=True)
     assert json.loads((tmp_path / "run" / "run_manifest.json").read_text())["status"] == "failed"

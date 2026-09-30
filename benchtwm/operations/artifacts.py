@@ -1,7 +1,13 @@
-"""Artifact layout, run manifests, and run discovery for the clean CLI."""
+"""Artifact layout, run manifests, and run discovery.
+
+Runs live at ``<artifact_root>/runs/<dataset_id>/<method_id>/seed-<n>--<hash>``,
+where ``hash`` fingerprints the fully resolved configuration.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import platform
 import socket
@@ -13,52 +19,51 @@ from typing import Any
 
 import torch
 
-from benchtwm.paths import PROJECT_ROOT
-from benchtwm.utils.formatting import experiment_signature
+from benchtwm.algorithms import get_algorithm
+from benchtwm.paths import DEFAULT_ARTIFACT_ROOT, PROJECT_ROOT
 from benchtwm.utils.io import ensure_dir, load_json, save_json
-from benchtwm.utils.methods import benchmark_track, task_id
+
+# Execution-only keys that do not change results.
+SIGNATURE_IGNORED_KEYS = {"show_progress"}
+FINAL_STATUSES = {"completed", "failed", "interrupted"}
+# Manifests written before the model-free/model-based naming used tracks.
+LEGACY_TRACKS = {"direct_rl": "model_free", "provisional_planning": "model_based"}
 
 
 def artifact_root(value: str | Path | None = None) -> Path:
-    return Path(value or PROJECT_ROOT / "artifacts").resolve()
+    return Path(value or DEFAULT_ARTIFACT_ROOT).resolve()
 
 
-def _path_component(value: str) -> str:
-    return str(value).strip().replace("_", "-").replace(" ", "-")
+def _normalize(value):
+    if isinstance(value, float):
+        return float(f"{value:.10g}")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _normalize(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    return value
 
 
-def run_directory(
-    params: dict[str, Any],
-    *,
-    dataset_id: str,
-    method_id: str,
-    root: str | Path | None = None,
-) -> Path:
+def experiment_signature(params: dict[str, Any]) -> str:
+    normalized = {key: _normalize(value) for key, value in sorted(params.items()) if key not in SIGNATURE_IGNORED_KEYS}
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def run_directory(params: dict[str, Any], *, root: str | Path | None = None) -> Path:
     signature = experiment_signature(params)[:12]
-    seed = int(params.get("seed", 0))
-    dataset_parts = Path(dataset_id).parts
-    environment_component = _path_component(str(params["env_id"]))
-    if dataset_parts and _path_component(dataset_parts[0]) in {environment_component, environment_component.replace("_", "-")}:
-        dataset_parts = dataset_parts[1:]
-    return (
-        artifact_root(root)
-        / "runs"
-        / environment_component
-        / Path(*dataset_parts)
-        / _path_component(str(params.get("train_mode", "offline")))
-        / _path_component(method_id)
-        / f"seed-{seed}--{signature}"
-    )
+    return artifact_root(root) / "runs" / Path(params["dataset_id"]) / params["method_id"] / f"seed-{int(params['seed'])}--{signature}"
 
 
-def _git_value(*args: str) -> str | None:
+def _git(*args: str) -> str | None:
     try:
         return subprocess.check_output(["git", *args], cwd=PROJECT_ROOT, text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 
 
-def _provenance(device: str | None = None) -> dict[str, Any]:
+def _provenance(device: str | None) -> dict[str, Any]:
     cuda = bool(torch.cuda.is_available())
     return {
         "python": sys.version.split()[0],
@@ -68,41 +73,30 @@ def _provenance(device: str | None = None) -> dict[str, Any]:
         "cuda_version": torch.version.cuda if cuda else None,
         "cuda_devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())] if cuda else [],
         "requested_device": device or "auto",
-        "git_commit": _git_value("rev-parse", "HEAD"),
-        "git_dirty": bool(_git_value("status", "--porcelain")),
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
     }
 
 
-def initial_manifest(
-    params: dict[str, Any],
-    *,
-    dataset_id: str,
-    method_id: str,
-    run_dir: Path,
-    device: str | None = None,
-) -> dict[str, Any]:
+def initial_manifest(params: dict[str, Any], *, run_dir: Path, device: str | None = None) -> dict[str, Any]:
     signature = experiment_signature(params)
+    now = datetime.now(timezone.utc).isoformat()
     return {
-        "schema_version": 1,
-        "run_id": f"{params['env_id']}:{dataset_id}:{method_id}:seed-{int(params.get('seed', 0))}:{signature[:12]}",
+        "schema_version": 2,
+        "run_id": f"{params['dataset_id']}:{params['method_id']}:seed-{int(params['seed'])}:{signature[:12]}",
         "status": "planned",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now,
+        "updated_at": now,
         "artifact_dir": str(run_dir),
-        "dataset_id": dataset_id,
-        "task_id": task_id(params, dataset_id),
-        "method_id": method_id,
-        "track": benchmark_track(params),
-        "recipe_id": params.get("recipe_id"),
+        "dataset_id": params["dataset_id"],
+        "env_id": params["env_id"],
+        "method_id": params["method_id"],
+        "algo": params["algo"],
+        "family": get_algorithm(params["algo"]).family,
+        "seed": int(params["seed"]),
         "config_signature": signature,
-        "environment": params.get("env_id"),
-        "train_mode": params.get("train_mode", "offline"),
-        "seed": int(params.get("seed", 0)),
         "provenance": _provenance(device),
     }
-
-
-FINAL_STATUSES = {"completed", "failed", "interrupted"}
 
 
 def write_manifest(run_dir: str | Path, manifest: dict[str, Any], *, status: str | None = None, error: str | None = None) -> dict[str, Any]:
@@ -142,18 +136,21 @@ def effective_status(manifest: dict[str, Any]) -> str:
     return status
 
 
+def manifest_family(manifest: dict[str, Any]) -> str | None:
+    return manifest.get("family") or LEGACY_TRACKS.get(str(manifest.get("track")))
+
+
 def load_manifest(run_dir: str | Path) -> dict[str, Any]:
     return load_json(Path(run_dir) / "run_manifest.json")
 
 
 def is_complete(run_dir: str | Path) -> bool:
     path = Path(run_dir)
-    manifest_path = path / "run_manifest.json"
-    if not manifest_path.exists() or not (path / "eval_summary.json").exists():
+    if not (path / "run_manifest.json").exists() or not (path / "eval_summary.json").exists():
         return False
     try:
         return load_manifest(path).get("status") == "completed"
-    except Exception:
+    except (OSError, ValueError):
         return False
 
 
@@ -165,7 +162,7 @@ def discover_runs(root: str | Path | None = None) -> list[tuple[Path, dict[str, 
     for path in runs_root.rglob("run_manifest.json"):
         try:
             discovered.append((path.parent, load_json(path)))
-        except Exception:
+        except (OSError, ValueError):
             continue
     return sorted(discovered, key=lambda item: item[1].get("updated_at", ""), reverse=True)
 

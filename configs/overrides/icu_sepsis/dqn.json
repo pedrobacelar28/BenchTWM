@@ -1,0 +1,4 @@
+{
+  "target_network_frequency": 512,
+  "policy_hidden_dim": 256
+}

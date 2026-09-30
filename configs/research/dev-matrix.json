@@ -1,0 +1,12 @@
+{
+  "description": "Every method on the main behavior dataset of each environment (dev tier), three seeds.",
+  "datasets": [
+    "epicare/smart/dev",
+    "icu-sepsis/expert/dev"
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ]
+}

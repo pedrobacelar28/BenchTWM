@@ -1,0 +1,38 @@
+{
+  "env_id": "icu_sepsis",
+  "seed": 0,
+  "ope_enabled": true,
+  "tiers": {
+    "dev": {
+      "num_train_episodes": 5000,
+      "num_val_episodes": 500,
+      "num_ope_episodes": 500
+    },
+    "final": {
+      "num_train_episodes": 100000,
+      "num_val_episodes": 10000,
+      "num_ope_episodes": 20000
+    }
+  },
+  "behaviors": {
+    "random": {
+      "behavior_policy": "random_admissible",
+      "description": "Uniform over the admissible actions of each state: broad coverage, lower reference."
+    },
+    "expert": {
+      "behavior_policy": "expert",
+      "description": "Packaged clinician action frequencies per state: the main behavior dataset."
+    },
+    "epsilon-expert": {
+      "behavior_policy": "epsilon_expert",
+      "epsilon": 0.2,
+      "description": "Clinician policy mixed with 20% uniform admissible exploration."
+    },
+    "optimal": {
+      "behavior_policy": "optimal",
+      "optimal_value_iteration_steps": 50000,
+      "optimal_value_iteration_delta": 1e-06,
+      "description": "Deterministic value-iteration policy of the packaged MDP: a simulator reference, narrow support."
+    }
+  }
+}

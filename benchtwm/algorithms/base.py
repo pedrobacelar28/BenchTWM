@@ -49,6 +49,8 @@ class OfflineAlgorithm:
     description: ClassVar[str] = ""
     #: What the early-stopping monitor (validation loss) measures.
     validation_objective: ClassVar[str] = "validation loss"
+    #: Environment action types this method supports (``configs/envs/*.json``).
+    action_types: ClassVar[tuple[str, ...]] = ("discrete",)
 
     def __init__(self, config: dict[str, Any], spec: DataSpec, device: torch.device):
         self.config = config
