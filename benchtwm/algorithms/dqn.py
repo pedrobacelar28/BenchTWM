@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 
-from benchtwm.envs.factory import make_env
+from benchtwm.envs import make_env
+from benchtwm.policies import Policy
 from benchtwm.models.mlp import build_q_network
 from benchtwm.utils.torch_utils import get_torch_device
 
 
-class DQNPolicy:
+class DQNPolicy(Policy):
     def __init__(self, network, *, temperature: float = 1.0):
+        super().__init__()
         self.network = network.eval()
         self.device = next(network.parameters()).device
         self.temperature = float(temperature)
@@ -29,15 +30,9 @@ class DQNPolicy:
                 probs = torch.softmax(q_values / max(self.temperature, 1e-6), dim=-1)
         return probs.cpu().numpy()
 
-    def act(self, obs, info, deterministic: bool = True) -> int:
-        probs = self.action_probabilities(obs, info, deterministic=deterministic)
-        if deterministic:
-            return int(probs.argmax())
-        return int(np.random.choice(len(probs), p=probs))
-
 
 def load_policy(config: dict, checkpoint: dict):
-    env = make_env(config, obs_backend=config["obs_backend"])
+    env = make_env(config)
     network = build_q_network(
         config,
         obs_dim=env.obs_dim,

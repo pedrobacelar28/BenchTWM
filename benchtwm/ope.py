@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from benchtwm.offline.dataset import OfflineTransitionDataset
+from benchtwm.data.dataset import OfflineTransitionDataset
 from benchtwm.utils.progress import tqdm
 from benchtwm.utils.io import ensure_dir, save_json
 

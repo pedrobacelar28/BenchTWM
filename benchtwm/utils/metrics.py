@@ -5,34 +5,14 @@ from __future__ import annotations
 import numpy as np
 
 
-ACTION_LEVELS = 5
+def action_stability(actions: list[int], distance_fn, *, abrupt_fn) -> tuple[float, float]:
+    """Mean action-change distance and rate of abrupt changes within one episode."""
 
-
-def decode_action(action_idx: int, action_levels: int = ACTION_LEVELS) -> tuple[int, int]:
-    return action_idx // action_levels, action_idx % action_levels
-
-
-def action_stability(actions: list[int], distance_fn=None, abrupt_threshold: float = 1.0, abrupt_fn=None) -> tuple[float, float]:
     if len(actions) <= 1:
         return 0.0, 0.0
-    if distance_fn is not None:
-        deltas = [float(distance_fn(previous, current)) for previous, current in zip(actions, actions[1:])]
-        abrupt = (
-            [float(bool(abrupt_fn(previous, current))) for previous, current in zip(actions, actions[1:])]
-            if abrupt_fn is not None
-            else [float(delta > float(abrupt_threshold)) for delta in deltas]
-        )
-        return float(np.mean(deltas)), float(np.mean(abrupt))
-    deltas = []
-    abrupt = []
-    prev_fluid, prev_vaso = decode_action(actions[0])
-    for action in actions[1:]:
-        fluid, vaso = decode_action(action)
-        diff_fluid = abs(fluid - prev_fluid)
-        diff_vaso = abs(vaso - prev_vaso)
-        deltas.append(diff_fluid + diff_vaso)
-        abrupt.append(float(diff_fluid > 1 or diff_vaso > 1))
-        prev_fluid, prev_vaso = fluid, vaso
+    pairs = list(zip(actions, actions[1:]))
+    deltas = [float(distance_fn(previous, current)) for previous, current in pairs]
+    abrupt = [float(bool(abrupt_fn(previous, current))) for previous, current in pairs]
     return float(np.mean(deltas)), float(np.mean(abrupt))
 
 

@@ -6,18 +6,20 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from benchtwm.envs.factory import make_env
+from benchtwm.envs import make_env
+from benchtwm.policies import Policy
 from benchtwm.models.dreamer import DreamerAgent, DreamerConfig
 from benchtwm.utils.torch_utils import get_torch_device
 
 
-class DreamerPolicy:
+class DreamerPolicy(Policy):
     ope_probability_contract = {
         "status": "exact",
         "message": "Exact masked categorical probabilities from the recurrent Dreamer actor.",
     }
 
     def __init__(self, agent: DreamerAgent):
+        super().__init__()
         self.agent = agent.eval()
         self.device = next(agent.parameters()).device
         self.obs_dim = int(agent.config.obs_dim)
@@ -63,11 +65,6 @@ class DreamerPolicy:
             probabilities = deployed
         return probabilities.cpu().numpy()
 
-    def act(self, obs, info, deterministic: bool = True) -> int:
-        probabilities = self.action_probabilities(obs, info, deterministic=deterministic)
-        if deterministic:
-            return int(np.argmax(probabilities))
-        return int(np.random.choice(self.num_actions, p=probabilities))
 
     def observe(self, action: int, reward: float) -> None:
         del reward  # The reference policy carry uses the previous action, not reward.
@@ -79,7 +76,7 @@ class DreamerPolicy:
 def load_policy(config: dict, checkpoint: dict) -> DreamerPolicy:
     if str(config.get("obs_backend", "state_vector")) != "state_vector":
         raise ValueError("Dreamer only supports obs_backend='state_vector'")
-    env = make_env(config, obs_backend="state_vector")
+    env = make_env(config)
     try:
         checkpoint_config = checkpoint.get("dreamer_config")
         if checkpoint_config:

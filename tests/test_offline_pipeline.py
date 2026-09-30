@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from benchtwm.offline.dataset import REQUIRED_ARRAYS, OfflineTransitionDataset
-from benchtwm.offline.generate_dataset import generate_dataset
+from benchtwm.data.dataset import REQUIRED_ARRAYS, OfflineTransitionDataset
+from benchtwm.data.collect import collect_dataset
 from benchtwm.offline.trainers import _training_batches, get_offline_trainer
 from benchtwm.operations.artifacts import initial_manifest
 from benchtwm.run_experiment import run_experiment
@@ -16,7 +16,7 @@ from benchtwm.run_experiment import run_experiment
 
 def _dataset_config(output_dir: Path, policy: str = "random_admissible", seed: int = 5) -> dict:
     config = {
-        "dataset_name": f"tiny_{policy}",
+        "env_id": "icu_sepsis",
         "output_dir": str(output_dir),
         "behavior_policy": policy,
         "seed": seed,
@@ -35,6 +35,7 @@ def _dataset_config(output_dir: Path, policy: str = "random_admissible", seed: i
 def _offline_common(ds_dir: Path, algo: str, obs_backend: str = "state_vector") -> dict:
     return {
         "algo": algo,
+        "env_id": "icu_sepsis",
         "train_mode": "offline",
         "seed": 0,
         "obs_backend": obs_backend,
@@ -101,8 +102,8 @@ class TestOfflinePipeline(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out1 = Path(tmp) / "ds1"
             out2 = Path(tmp) / "ds2"
-            generate_dataset(_dataset_config(out1, seed=13))
-            generate_dataset(_dataset_config(out2, seed=13))
+            collect_dataset(_dataset_config(out1, seed=13))
+            collect_dataset(_dataset_config(out2, seed=13))
             data1 = np.load(out1 / "train.npz")
             data2 = np.load(out2 / "train.npz")
             self.assertTrue(REQUIRED_ARRAYS.issubset(set(data1.files)))
@@ -117,7 +118,7 @@ class TestOfflinePipeline(unittest.TestCase):
             for policy in ["random_admissible", "expert", "optimal", "epsilon_expert"]:
                 with self.subTest(policy=policy):
                     out = Path(tmp) / policy
-                    generate_dataset(_dataset_config(out, policy=policy, seed=17))
+                    collect_dataset(_dataset_config(out, policy=policy, seed=17))
                     data = np.load(out / "train.npz")
                     self.assertTrue(np.isfinite(data["behavior_logprobs"]).all())
                     for action, mask in zip(data["actions"], data["action_masks"]):
@@ -126,7 +127,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_offline_dataset_state_vector_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(out))
+            collect_dataset(_dataset_config(out))
             ds = OfflineTransitionDataset(out / "train.npz", obs_backend="state_vector", seed=0)
             batch = ds.sample(3)
             self.assertEqual(batch.obs.shape[0], 3)
@@ -137,7 +138,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_transition_and_sequence_iterators_cover_expected_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(out))
+            collect_dataset(_dataset_config(out))
             ds = OfflineTransitionDataset(out / "train.npz", obs_backend="state_vector", seed=0)
             transition_total = 0
             for batch in ds.iter_transition_batches(7):
@@ -156,7 +157,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_all_offline_trainers_smoke(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds_dir = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(ds_dir, policy="epsilon_expert"))
+            collect_dataset(_dataset_config(ds_dir, policy="epsilon_expert"))
             variants = [
                 ("dqn", "state_vector"),
                 ("raw_model", "state_vector"),
@@ -173,7 +174,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_early_stopping_triggers_from_validation_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds_dir = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(ds_dir))
+            collect_dataset(_dataset_config(ds_dir))
             config = _tiny_offline_config(ds_dir, "dqn")
             config.update(
                 {
@@ -214,7 +215,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_color_wm_rollout_metrics_are_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds_dir = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(ds_dir, policy="epsilon_expert"))
+            collect_dataset(_dataset_config(ds_dir, policy="epsilon_expert"))
             config = _tiny_offline_config(ds_dir, "reconstructive_model", obs_backend="state_vector")
             config["cem_horizon"] = 5
             result = get_offline_trainer("reconstructive_model")(config, Path(tmp))
@@ -226,7 +227,7 @@ class TestOfflinePipeline(unittest.TestCase):
     def test_runner_writes_offline_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             ds_dir = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(ds_dir))
+            collect_dataset(_dataset_config(ds_dir))
             config = _tiny_offline_config(ds_dir, "dqn")
             config["save_trajectories"] = True
             run_dir = Path(tmp) / "run"

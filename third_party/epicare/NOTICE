@@ -6,3 +6,9 @@ Licensed under the Apache License, Version 2.0; see LICENSE.
 
 The vendored environment was adapted locally to use the Gymnasium reset/step
 API and per-instance random number generators for reproducible rollouts.
+
+The multivariate-normal CDF in `_adverse_event_probability` is evaluated with a
+fixed quasi-Monte Carlo seed. Upstream it used the global NumPy random state,
+so the expected rewards used by the SMART, Standard-of-Care, and Oracle
+reference policies varied slightly between processes. Environment dynamics are
+unchanged: sampled adverse events do not use this function.

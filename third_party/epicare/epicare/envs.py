@@ -533,7 +533,9 @@ class EpiCare(gym.Env):
         threshold = logit(self.adverse_event_threshold) - effect
         mu = self.diseases[disease]["symptom_means"]
         cov = self.diseases[disease]["symptom_covariances"]
-        p_ok = stats.multivariate_normal(mu, cov).cdf(threshold)
+        # The CDF is a randomized quasi-Monte Carlo integral; a fixed seed makes
+        # the reference policies' expected rewards reproducible across processes.
+        p_ok = stats.multivariate_normal(mu, cov, seed=0).cdf(threshold)
         return 1 - p_ok
 
     def _adverse_event_probability_empirical(self, disease, treatment, N=1_000_000):

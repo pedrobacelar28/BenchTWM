@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from benchtwm.offline.dataset import OfflineTransitionDataset
+from benchtwm.data.dataset import OfflineTransitionDataset
 
 
 @dataclass

@@ -7,11 +7,10 @@ import numpy as np
 import pandas as pd
 
 from benchtwm.operations.reporting import build_run_report
-from benchtwm.envs.factory import make_env
-from benchtwm.envs.reference import make_reference_policy
-from benchtwm.offline.dataset import REQUIRED_ARRAYS
-from benchtwm.offline.generate_dataset import generate_dataset
-from benchtwm.offline.ope import _estimate, evaluate_ope
+from benchtwm.envs import make_env
+from benchtwm.data.dataset import REQUIRED_ARRAYS
+from benchtwm.data.collect import collect_dataset
+from benchtwm.ope import _estimate, evaluate_ope
 from benchtwm.offline.trainers import get_offline_trainer
 
 
@@ -90,7 +89,7 @@ class TestEpiCareIntegration(unittest.TestCase):
     def test_dataset_schema_and_ope(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            metadata = generate_dataset(_dataset_config(root))
+            metadata = collect_dataset(_dataset_config(root))
             data = np.load(root / "train.npz")
             self.assertTrue(REQUIRED_ARRAYS.issubset(data.files))
             self.assertEqual(data["observations"].dtype, np.float32)
@@ -106,7 +105,7 @@ class TestEpiCareIntegration(unittest.TestCase):
     def test_wpdis_matches_on_policy_return_for_variable_length_epicare_trajectories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            generate_dataset(_dataset_config(root))
+            collect_dataset(_dataset_config(root))
             data = np.load(root / "ope_test.npz")
             logged_returns = [
                 float(data["rewards"][data["episode_ids"] == episode_id].sum())
@@ -115,7 +114,7 @@ class TestEpiCareIntegration(unittest.TestCase):
             config = {"env_id": "epicare", "environment_seed": 1, "obs_backend": "state_vector"}
             env = make_env(config)
             try:
-                smart = make_reference_policy(env, "smart", seed=0)
+                smart = env.make_policy("smart", seed=0)
                 summary, _ = evaluate_ope(
                     smart,
                     dataset_path=root / "ope_test.npz",
@@ -145,7 +144,7 @@ class TestEpiCareIntegration(unittest.TestCase):
     def test_all_offline_algorithms_smoke(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            generate_dataset(_dataset_config(data_dir))
+            collect_dataset(_dataset_config(data_dir))
             for algo in ["dqn", "raw_model", "latent_model", "reconstructive_model"]:
                 with self.subTest(algo=algo):
                     result = get_offline_trainer(algo)(_offline_config(data_dir, algo), Path(tmp) / algo)

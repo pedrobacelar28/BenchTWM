@@ -30,11 +30,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchtwm.algorithms.registry import get_policy_loader
-from benchtwm.envs.factory import make_env
-from benchtwm.envs.reference import make_reference_policy
+from benchtwm.envs import get_environment, make_env
 from benchtwm.evaluation import evaluate_policy
-from benchtwm.offline.generate_dataset import generate_dataset
-from benchtwm.offline.ope import evaluate_ope, export_ope
+from benchtwm.data.collect import collect_dataset
+from benchtwm.ope import evaluate_ope, export_ope
 from benchtwm.operations.artifacts import (
     artifact_root,
     discover_runs,
@@ -303,7 +302,7 @@ def _cmd_dataset_build(args: argparse.Namespace) -> int:
             console.table("Configuration", ("field", "value"), config.items())
             console.note("Dry run only. No data will be generated.")
         return 0
-    metadata = generate_dataset({**config, "show_progress": not args.no_progress, "quiet": bool(args.json)})
+    metadata = collect_dataset({**config, "show_progress": not args.no_progress, "quiet": bool(args.json)})
     payload["metadata"] = metadata
     if args.json:
         console.emit(payload)
@@ -532,7 +531,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
             num_episodes=args.episodes or int(config.get("eval_episodes", 100)),
             eval_seed_base=args.seed_base if args.seed_base is not None else int(config.get("eval_seed_base", 100000)),
             output_dir=destination,
-            checkpoint_name="best-re-evaluated",
+            label="best-re-evaluated",
             export_csv=True,
             show_progress=not args.no_progress,
         )
@@ -613,28 +612,21 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     dataset = catalog.dataset(args.dataset_id)
     config = catalog.dataset_config(dataset.identifier, artifact_root=_root(args))
     destination = ensure_dir(_root(args) / "reports" / "baselines" / dataset.identifier / _timestamp())
-    if args.policies:
-        policies = args.policies
-    elif dataset.env_id == "epicare":
-        policies = ["smart", "soc", "random", "oracle"]
-    else:
-        # ICU reference policies are evaluated directly in the simulator.
-        policies = ["expert", "epsilon_expert", "optimal", "random_admissible"]
+    policies = args.policies or list(get_environment(dataset.env_id).reference_policies)
     summaries = {}
     for name in policies:
-        env = make_env(config, obs_backend=config["obs_backend"])
+        env = make_env(config)
         try:
-            policy = make_reference_policy(env, name, seed=int(config["seed"]), config=config)
+            policy = env.make_policy(name, seed=int(config["seed"]), options=config)
         finally:
             env.close()
-        evaluation_config = {**config, "algo": "baseline", "method_id": name}
         result = evaluate_policy(
             policy,
-            config=evaluation_config,
+            config={**config, "algo": "baseline", "method_id": name},
             num_episodes=args.episodes,
             eval_seed_base=100000,
             output_dir=destination / name,
-            checkpoint_name=name,
+            label=name,
             export_csv=True,
             show_progress=not args.no_progress,
         )
@@ -655,7 +647,7 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         console.emit({"output_dir": str(destination), "summaries": summaries})
     else:
         console.success(f"Baseline evaluation written to {destination}")
-        console.table("Direct Baselines", ("policy", "return", "success", "adverse events", "length"), [(name, values.get("mean_return"), values.get("mean_success"), values.get("mean_adverse_event_rate", "-"), values.get("mean_length")) for name, values in summaries.items()])
+        console.table("Direct Baselines", ("policy", "return", "success", "adverse events", "length"), [(name, values.get("mean_return"), values.get("mean_success"), values.get("outcome_adverse_event", "-"), values.get("mean_length")) for name, values in summaries.items()])
     return 0
 
 
@@ -855,7 +847,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             recipe = next(item for item in catalog.recipes if item.env_id == env_id)
             config = Catalog._materialize(load_json(recipe.config_path), seed=0)
             config.update({"env_id": env_id, "environment_seed": 1, "env_kwargs": {}})
-            env = make_env(config, obs_backend=config["obs_backend"], seed=0)
+            env = make_env(config, seed=0)
             try:
                 _, info = env.reset(seed=0)
                 action = int(info["admissible_actions"][0])

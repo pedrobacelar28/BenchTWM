@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 
-from benchtwm.envs.factory import make_env
+from benchtwm.envs import make_env
+from benchtwm.policies import Policy
 from benchtwm.models.mlp import build_actor_critic
 from benchtwm.utils.torch_utils import get_torch_device
 
 
-class BCPolicy:
+class BCPolicy(Policy):
     def __init__(self, actor, *, temperature: float = 1.0):
+        super().__init__()
         self.actor = actor.eval()
         self.device = next(actor.parameters()).device
         self.temperature = float(temperature)
@@ -28,15 +29,9 @@ class BCPolicy:
                 probs = torch.softmax(logits / max(self.temperature, 1e-6), dim=-1)
         return probs.cpu().numpy()
 
-    def act(self, obs, info, deterministic: bool = True) -> int:
-        probs = self.action_probabilities(obs, info, deterministic=deterministic)
-        if deterministic:
-            return int(np.argmax(probs))
-        return int(np.random.choice(len(probs), p=probs))
-
 
 def load_policy(config: dict, checkpoint: dict):
-    env = make_env(config, obs_backend=config["obs_backend"])
+    env = make_env(config)
     actor = build_actor_critic(
         config,
         obs_dim=env.obs_dim,

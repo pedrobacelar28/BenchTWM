@@ -14,6 +14,7 @@ class TestExports(unittest.TestCase):
     def test_clinical_export_is_deterministic(self):
         config = {
             "algo": "dqn",
+            "env_id": "icu_sepsis",
             "seed": 0,
             "obs_backend": "state_vector",
             "gamma": 1.0,

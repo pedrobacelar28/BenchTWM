@@ -18,7 +18,7 @@ from benchtwm.models.dreamer import (
     twohot_loss,
     twohot_prediction,
 )
-from benchtwm.offline.dreamer_dataset import DreamerSequenceBatch
+from benchtwm.data.sequences import DreamerSequenceBatch
 
 
 def _rms(x, scale, eps=1e-4):

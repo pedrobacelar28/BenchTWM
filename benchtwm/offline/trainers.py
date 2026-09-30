@@ -29,8 +29,8 @@ from benchtwm.evaluation import evaluate_policy
 from benchtwm.models.mlp import build_actor_critic, build_q_network
 from benchtwm.models.dreamer import DreamerAgent, DreamerConfig, DreamerOptimizer
 from benchtwm.models.offline_rl import build_cql_agent, build_iql_agent
-from benchtwm.offline.dataset import OfflineTransitionDataset
-from benchtwm.offline.dreamer_dataset import DreamerSequenceStream
+from benchtwm.data.dataset import OfflineTransitionDataset
+from benchtwm.data.sequences import DreamerSequenceStream
 from benchtwm.utils.metrics import summarize_training
 from benchtwm.utils.methods import method_id
 from benchtwm.utils.seeding import set_seed
@@ -291,10 +291,9 @@ def _eval_stats(policy, config: dict, progress: OfflineProgress, args) -> dict:
         config=config,
         num_episodes=_eval_episodes(args),
         eval_seed_base=int(args.eval_seed_base),
-        checkpoint_name=checkpoint_name,
+        label=checkpoint_name,
         export_csv=False,
         show_progress=_show_progress(args),
-        progress_desc=f"eval step={progress.step}",
     )
     episodes = result["episodes"]
     summary_metrics = {

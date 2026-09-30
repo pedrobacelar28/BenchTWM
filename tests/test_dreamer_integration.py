@@ -5,11 +5,11 @@ from pathlib import Path
 import numpy as np
 
 from benchtwm.algorithms.dreamer import DreamerPolicy, load_policy
-from benchtwm.envs.factory import make_env
+from benchtwm.envs import make_env
 from benchtwm.models.dreamer import DreamerAgent, DreamerConfig
-from benchtwm.offline.dataset import OfflineTransitionDataset
-from benchtwm.offline.dreamer_dataset import DreamerSequenceBatch, DreamerSequenceStream
-from benchtwm.offline.ope import evaluate_ope
+from benchtwm.data.dataset import OfflineTransitionDataset
+from benchtwm.data.sequences import DreamerSequenceBatch, DreamerSequenceStream
+from benchtwm.ope import evaluate_ope
 from benchtwm.offline.trainers import get_offline_trainer
 from benchtwm.operations.catalog import Catalog
 from benchtwm.run_experiment import run_experiment
@@ -199,7 +199,7 @@ class TestDreamerIntegration(unittest.TestCase):
                 "env_kwargs": {"patient_modifiers": True},
             }
             policy = load_policy(load_config, result["checkpoint_best"])
-            env = make_env(load_config, obs_backend="state_vector", seed=0)
+            env = make_env(load_config, seed=0)
             try:
                 obs, info = env.reset(seed=0)
                 action = policy.act(obs, info, deterministic=True)
@@ -258,7 +258,7 @@ class TestDreamerIntegration(unittest.TestCase):
         ]
         for raw in env_configs:
             with self.subTest(env_id=raw["env_id"]):
-                env = make_env(raw, obs_backend="state_vector", seed=0)
+                env = make_env(raw, seed=0)
                 try:
                     cfg = DreamerConfig(
                         obs_dim=env.obs_dim,

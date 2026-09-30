@@ -11,7 +11,7 @@ import torch
 
 from benchtwm.algorithms.registry import get_policy_loader, get_trainer
 from benchtwm.evaluation import evaluate_policy
-from benchtwm.offline.ope import evaluate_ope, export_ope
+from benchtwm.ope import evaluate_ope, export_ope
 from benchtwm.operations.artifacts import write_manifest
 from benchtwm.utils.formatting import output_dir_for_experiment
 from benchtwm.utils.io import ensure_dir, load_json, load_pickle, save_json, save_pickle
@@ -275,10 +275,9 @@ def run_experiment(
             num_episodes=int(params["eval_episodes"]),
             eval_seed_base=int(params["eval_seed_base"]),
             output_dir=output_dir,
-            checkpoint_name="best",
+            label="best",
             export_csv=bool(params.get("save_trajectories", True)),
             show_progress=bool(params.get("show_progress", True)),
-            progress_desc="final_eval",
         )
         timing["evaluation_seconds"] = float(time.perf_counter() - evaluation_started)
         update_progress(

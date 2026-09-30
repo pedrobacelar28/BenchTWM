@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from benchtwm.algorithms.registry import get_policy_loader
-from benchtwm.offline.generate_dataset import generate_dataset
+from benchtwm.data.collect import collect_dataset
 from benchtwm.offline.trainers import get_offline_trainer
 from benchtwm.operations.catalog import Catalog
 from benchtwm.operations.artifacts import initial_manifest
@@ -37,7 +37,7 @@ class TestV0Benchmark(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset_dir = root / "dataset"
-            generate_dataset(_tiny_icu_dataset(dataset_dir))
+            collect_dataset(_tiny_icu_dataset(dataset_dir))
             data = np.load(dataset_dir / "train.npz")
             for algo in ("bc", "iql", "cql"):
                 with self.subTest(algo=algo):
@@ -73,7 +73,7 @@ class TestV0Benchmark(unittest.TestCase):
                     self.assertIn("model_state_dict", result["checkpoint_best"])
                     policy = get_policy_loader(algo)(config, result["checkpoint_best"])
                     mask = data["action_masks"][0]
-                    obs = data["state_vectors"][0]
+                    obs = data["observations"][0]
                     info = {"action_mask": mask, "admissible_actions": np.flatnonzero(mask).tolist(), "state_id": int(data["state_ids"][0])}
                     probabilities = policy.action_probabilities(obs, info, deterministic=False)
                     self.assertTrue(np.isfinite(probabilities).all())

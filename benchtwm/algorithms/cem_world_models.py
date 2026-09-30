@@ -6,7 +6,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from benchtwm.envs.factory import make_env
+from benchtwm.envs import make_env
+from benchtwm.policies import Policy
 from benchtwm.models.cem_world_models import RawDynamicsModel, ReconstructiveLatentModel, LatentDynamicsModel
 from benchtwm.planners.cem import CategoricalCEMPlanner
 from benchtwm.utils.torch_utils import as_device_string, get_torch_device
@@ -50,7 +51,7 @@ def build_model(model_family: str, *, obs_dim: int, num_actions: int, hidden_dim
     )
 
 
-class CEMWorldModelPolicy:
+class CEMWorldModelPolicy(Policy):
     ope_probability_contract = {
         "status": "diagnostic",
         "message": (
@@ -60,6 +61,7 @@ class CEMWorldModelPolicy:
     }
 
     def __init__(self, model, planner: CategoricalCEMPlanner, gamma: float):
+        super().__init__()
         self.model = model.eval()
         self.planner = planner
         self.gamma = float(gamma)
