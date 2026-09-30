@@ -16,7 +16,7 @@ rules are required to match the JAX source.
 
 ## Module correspondence
 
-| JAX source | PyTorch port | Fidelity requirement |
+| JAX source | PyTorch port (`benchtwm/algorithms/dreamer/agent.py`) | Fidelity requirement |
 |---|---|---|
 | `rssm.Encoder` vector branch | `VectorEncoder` | symlog, Linear, RMSNorm, SiLU ordering |
 | `rssm.RSSM` | `RSSM` | blocked recurrent core, posterior/prior, unimix one-hot sampling, balanced KL and free nats |
@@ -37,11 +37,11 @@ rules are required to match the JAX source.
   equations.
 - `action_mask` is applied only to deployed actor logits. It is not an
   observation feature and does not add a loss to the Dreamer core.
-- The public observation is always `float32 state_vector`. Internal categorical
-  stochastic states and one-hot action embeddings are not public state
-  encodings.
-- The public recipes use bfloat16 compute on CUDA, matching the source JAX
-  configuration. CPU execution and tiny tests fall back to float32 to avoid
+- The observation is always the environment's `float32` vector. Internal
+  categorical stochastic states and one-hot action embeddings are not agent
+  observations.
+- `configs/algorithms/dreamer.json` uses bfloat16 compute on CUDA, matching
+  the source JAX configuration. CPU execution and tiny tests fall back to float32 to avoid
   unsupported kernels; parity tolerances account for this device boundary.
 - The current dataset schema combines environment termination and horizon
   truncation in `terminals`. Dreamer therefore receives that recorded signal
@@ -52,10 +52,11 @@ rules are required to match the JAX source.
 `tests/test_dreamer_fidelity.py` independently checks source formulas for
 symlog/symexp, RMS normalization, categorical KL/unimix, symmetric two-hot
 prediction/loss, blocked RSSM recurrence, lambda-return, slow-value updates,
-and the AGC/RMS/momentum optimizer order. `tests/test_dreamer_integration.py`
-checks sequence boundaries, recurrent policy lifecycle, action masks,
-checkpoint loading, OPE lifecycle, catalog coverage, and a tiny full training
-run.
+and the AGC/RMS/momentum optimizer order. `tests/test_dreamer.py` checks
+sequence boundaries and carry, the recurrent policy lifecycle, action masks,
+and checkpoint round trips; the contract tests in `tests/test_algorithms.py`
+and `tests/test_ope.py` cover training, deployment, and OPE on every
+environment.
 
 The pinned fixture in `tests/fixtures/dreamer_jax_reference.json` was generated
 with JAX 0.4.33 by `scripts/dreamer_jax_reference.py`. It compares fixed

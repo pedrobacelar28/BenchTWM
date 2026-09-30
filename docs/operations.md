@@ -1,89 +1,73 @@
-# Operations
+# Command Line and Artifacts
 
-Run all commands from the BenchTWM repository root with:
+`bench` (equivalently `python -m benchtwm` or `python scripts/bench.py`).
+Global options, accepted before or after the subcommand: `--artifact-root`
+(default `artifacts/`), `--config-root` (default `configs/`), `--json`, and
+`--color never`.
 
-```bash
-python scripts/bench.py <command>
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `doctor` | Packages, CUDA/GPUs, registered environments and algorithms, config errors |
+| `catalog` | Datasets (with build state) and methods |
+| `validate [--smoke]` | Check configs; optionally step every environment once |
+| `dataset list \| show <id> \| build <id>` | Discover and collect datasets |
+| `inspect dataset <id>` | Array shapes and dtypes of a built dataset |
+| `baselines <id>` | Evaluate the environment's reference policies in the simulator |
+| `train <dataset> <method>` | One run: train, evaluate, OPE |
+| `suite <dataset>` | Queue every (or `--method`-selected) method over `--seeds` |
+| `status [run]` | Recent runs and their status |
+| `inspect run <run>` | Optimization summary, direct evaluation, OPE diagnostics |
+| `evaluate <run>` | Fresh simulator evaluation of a completed run |
+| `ope <run>` | Recompute OPE (`--target-mode`, `--bootstrap`, `--write-canonical`) |
+| `report <run>` | Markdown and JSON report under `reports/` |
+| `research sweep \| matrix \| tune \| collect \| summarize \| reevaluate` | Experiment management |
+
+Run options (`train`, `suite`, `research sweep|matrix|tune`): `--set
+KEY=JSON`, `--seed`, `--device auto|cpu|cuda`, `--force`, `--dry-run`,
+`--no-progress`. Queue options: `--seeds`, `--execute` (without it only the
+plan is printed), `--jobs`, `--gpus 0,1`, `--follow`.
+
+A `<run>` is a run directory, a `run_id`, or a unique directory name.
+
+## Queues
+
+`suite` and `research sweep|matrix` run each job in its own worker process with
+its own log, progress file, and optional GPU. Completed runs are skipped unless
+`--force` is given. Queue state and `suite_results.json` (jobs, per-method
+statistics, and planning gains) are written to `artifacts/queues/<timestamp>/`.
+
+## Run lifecycle
+
+`run_manifest.json` records identity, provenance (git commit, Python, torch,
+devices), and status:
+
+| Status | Meaning |
+|---|---|
+| `planned`, `queued`, `running` | Not finished |
+| `completed` | All artifacts written |
+| `failed` | An exception stopped the run (`error` holds it) |
+| `interrupted` | Stopped by Ctrl+C or SIGTERM |
+| `stale` | Shown by `status` for a `running` run whose process no longer exists |
+
+## Artifact layout
+
+```text
+artifacts/
+  datasets/<env>/<behavior>/<tier>/{train,val,ope_test}.npz, metadata.json, episodes_summary.csv
+  runs/<env>/<behavior>/<tier>/<method>/seed-<n>--<hash>/
+      config.json  run_manifest.json  train_history.csv
+      checkpoint_best.pt  checkpoint_last.pt
+      eval_summary.json  episodes_summary.csv  trajectories.csv  environment_spec.json
+      ope_summary.json  ope_bootstrap.csv  metrics_summary.json
+      evaluations/<timestamp>/  ope/<timestamp>/      (later recomputations)
+  queues/<timestamp>/{jobs,logs,progress}/, queue_manifest.json, suite_results.json
+  reports/summary/  reports/baselines/  reports/<run>/  reports/run_index.csv
+  studies/<dataset>__<method>.sqlite3
 ```
 
-`doctor` is the first diagnostic command. It reports Python packages, CUDA,
-visible GPUs, the artifact root, and the vendored ICU-Sepsis and EpiCare cores.
-
-## Offline Lifecycle
-
-```bash
-python scripts/bench.py catalog
-python scripts/bench.py dataset show epicare/smart/dev
-python scripts/bench.py dataset build epicare/smart/dev
-python scripts/bench.py train epicare/smart/dev dqn --dry-run
-python scripts/bench.py train epicare/smart/dev dqn
-python scripts/bench.py status
-```
-
-`train` checks that `train.npz`, `val.npz`, and, when requested, `ope_test.npz`
-exist before it starts. Dataset generation is always explicit.
-
-For offline recipes, the initial plan states the early-stopping monitor,
-direction, validation cadence, patience, and checkpoint rule. The terminal then
-labels optimization, final direct evaluation, and held-out OPE as distinct
-phases. OPE shows separate ratio-construction and bootstrap progress bars.
-
-Use `--set KEY=JSON_VALUE` for an ephemeral typed override. It never mutates a
-recipe file:
-
-```bash
-python scripts/bench.py train epicare/smart/dev dqn \
-  --set offline_train_steps=2000 --set policy_hidden_dim=64 --dry-run
-```
-
-Use `--mode online` only for deliberate simulator baselines. Offline is the
-default and is the recommended benchmark workflow.
-
-## Suites and Local Queues
-
-`suite` only prints its plan unless `--execute` is present:
-
-```bash
-python scripts/bench.py suite epicare/smart/dev --method dqn --method raw-model
-python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --execute
-python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --gpus 0,1 --execute
-python scripts/bench.py suite epicare/smart/dev --seeds 0,1 --jobs 2 --gpus 0,1 --follow --execute
-```
-
-Each worker receives an isolated resolved config, log file, manifest, and
-device assignment. A completed run is skipped on a later queue invocation
-unless `--force` is supplied. With `--follow`, the parent process renders one
-live progress row per job without interleaving worker output. Queue manifests
-and the central `suite_results.json` are under `artifacts/queues/<timestamp>/`.
-The central JSON contains every job's identity, resolved config, optimization
-summary, direct evaluation, OPE, timing, and method-level aggregates. The
-individual run directories remain the canonical location for checkpoints and
-per-method histories.
-
-## Evidence and Artifacts
-
-The command line deliberately labels three different measurement regimes:
-
-1. **Offline optimization** uses fixed `train.npz` and `val.npz` and reports
-   algorithm-specific losses.
-2. **Direct simulator evaluation** uses fresh benchmark episodes and reports
-   return, success, safety, burden, and environment-declared metrics.
-3. **OPE** uses held-out `ope_test.npz`; IS, WIS, PDIS, WPDIS, bootstrap
-   intervals, support, ESS, and extreme-weight diagnostics are reported
-   independently from optimization and simulator evaluation.
-
-```bash
-python scripts/bench.py inspect run <run-id-or-path>
-python scripts/bench.py evaluate <run-id-or-path> --episodes 1000
-python scripts/bench.py ope <run-id-or-path> --bootstrap 500
-python scripts/bench.py report <run-id-or-path>
-```
-
-`ope` uses the deployed policy semantics by default. Its reliability table must
-be checked before treating an estimate as a ranking. `--target-mode stochastic`
-evaluates a different counterfactual stochastic policy, while
-`--write-canonical` replaces the run-level OPE summary after a deployed-mode
-recomputation.
-
-`status`, `catalog`, `inspect`, and the final results of operational commands
-accept `--json` for automation.
+`metrics_summary.json` collects the scalar results of a run (training summary,
+evaluation summary, OPE headline, timings) in one document for downstream
+analysis. Runs written before this layout (under `.../offline/<method>/`)
+are still discovered and loaded.

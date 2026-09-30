@@ -1,15 +1,13 @@
 # Examples
 
-All examples run from the repository root and use only the public
-`python scripts/bench.py` interface.
+Run from the repository root after `pip install -e .`.
 
 | File | Demonstrates |
 |---|---|
-| `01_epicare_offline.sh` | Explicit logged-data build and offline training. |
-| `02_inspect_dataset.py` | Reading the versioned NPZ schema and metadata. |
-| `03_evaluate_and_ope.sh` | Fresh simulator evaluation, OPE, and a report for a run. |
-| `04_local_suite.sh` | Dry-running and executing a local multi-seed queue. |
-| `05_extension_check.py` | Validating the catalog and adapter surface before an extension. |
+| `01_epicare_offline.sh` | Building a dataset and running one offline experiment |
+| `02_inspect_dataset.py` | Reading a dataset split and its metadata |
+| `03_evaluate_and_ope.sh` | Re-evaluation, OPE recomputation, and a report for a run |
+| `04_local_suite.sh` | Planning and executing a multi-seed queue, then summarizing it |
+| `05_extension_check.py` | Checking registries and configs after an extension |
 
-The shell examples intentionally use EpiCare `dev` and dry-run commands first.
-Replace the IDs with any values shown by `python scripts/bench.py catalog`.
+Replace the ids with any shown by `bench catalog`.

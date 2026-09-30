@@ -1,13 +1,12 @@
 # Analysis
 
-BenchTWM exports machine-readable training histories, direct simulator episodes,
-trajectories, OPE summaries, and run manifests under `artifacts/`. Generate a
-compact environment-agnostic report with:
+Downstream notebooks and plots should read the exported files, not private
+runner objects:
 
-```bash
-python scripts/bench.py report <run-id-or-path>
-```
-
-Use `python scripts/bench.py research collect` to create a flat CSV index over
-all clean-layout runs. Downstream notebooks and plotting code should consume
-the exported CSV/JSON artifacts rather than depend on private runner objects.
+- `bench research summarize` writes `runs.csv`, `aggregate.csv`,
+  `planning_gain.csv`, `summary.json`, and `report.md` under
+  `artifacts/reports/summary/`.
+- `bench research collect` writes a flat index of every run, with its training,
+  evaluation, OPE, and timing scalars, to `artifacts/reports/run_index.csv`.
+- Each run directory holds `metrics_summary.json` plus the per-episode and
+  per-step CSV files described in [docs/operations.md](../docs/operations.md).

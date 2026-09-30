@@ -1,23 +1,23 @@
 # Third-Party Notices
 
-This artifact vendors the ICU-Sepsis benchmark packages under
-`third_party/icu-sepsis/` so the experiments can run without requiring a
-separate checkout.
+BenchTWM vendors the runtime cores of two benchmarks under `third_party/` so
+experiments run without separate checkouts. Each keeps its upstream license
+and a `NOTICE` describing local modifications:
 
-The vendored benchmark code keeps its upstream license files:
+- ICU-Sepsis (MIT): `third_party/icu-sepsis/LICENSE`,
+  `third_party/icu-sepsis/packages/icu_sepsis/LICENSE.txt`, and
+  `third_party/icu-sepsis/NOTICE`.
+- EpiCare (Apache-2.0): `third_party/epicare/LICENSE` and
+  `third_party/epicare/NOTICE`.
 
-- `third_party/icu-sepsis/LICENSE`
-- `third_party/icu-sepsis/packages/icu_sepsis/LICENSE.txt`
-- `third_party/icu-sepsis/packages/icu_sepsis_helpers/LICENSE.txt`
-
-Generated experiment artifacts such as checkpoints, datasets, Optuna databases,
-logs, and plots are intentionally excluded from this public source package.
+Generated artifacts (datasets, checkpoints, Optuna databases, logs, reports)
+are excluded from the source tree.
 
 ## DreamerV3
 
-The PyTorch implementation in `src/models/dreamer.py` is a framework port of
-the vector-observation, discrete-action path of Danijar Hafner's DreamerV3
-repository:
+The PyTorch implementation in `benchtwm/algorithms/dreamer/agent.py` is a
+framework port of the vector-observation, discrete-action path of Danijar
+Hafner's DreamerV3 repository:
 
 - source: `https://github.com/danijar/dreamerv3`
 - pinned source commit: `e3f02248693a79dc8b0ebd62c93683888ddaccfe`

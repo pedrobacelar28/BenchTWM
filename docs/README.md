@@ -1,36 +1,27 @@
-# Documentation Map
+# Documentation
 
-The documentation is organized around the lifecycle of a benchmark experiment.
+Read in the order of an experiment's lifecycle:
 
-1. [Operations](operations.md): the offline-first `bench.py` lifecycle,
-   queues, output inspection, and evidence boundaries.
-2. [Benchmarks](benchmarks.md): ICU-Sepsis, EpiCare, and the two DTR additions,
-   their source material, observation/action spaces, and the adapter contract.
-3. [Datasets](datasets.md): curated behavior-policy variants, `dev`/`final`
-   tiers, and public dataset IDs.
-4. [Data schema](data-schema.md): upstream data formats, normalized local NPZ
-   files, behavior propensities, splits, and metadata.
-5. [Algorithms](algorithms.md): DQN, PPO, the three CEM world-model families,
-   and the offline DreamerV3-style agent.
-6. [Dreamer fidelity audit](dreamer-fidelity.md): source commit, module mapping,
-   BenchTWM boundary adaptations, and parity requirements.
-7. [Evaluation](evaluation.md): training metrics, simulator evaluation, OPE,
-   artifacts, and interpretation limits.
-8. [Extending the suite](extending.md): the exact contracts for a new
-   environment or algorithm.
-9. [Recipes and research](recipes.md): catalog IDs, versioned recipes, sweeps,
-   matrices, and tuning.
-10. [Technical specification](paper/main.tex): a self-contained LaTex document
-   written in paper form, without empirical results.
+1. [Environments](environments.md): ICU-Sepsis and EpiCare, their observations,
+   actions, metrics, and the adapter contract.
+2. [Datasets](datasets.md): behavior policies, tiers, and dataset ids.
+3. [Data schema](data-schema.md): the arrays stored in every split.
+4. [Algorithms](algorithms.md): the eight methods and the shared interface.
+5. [Evaluation](evaluation.md): model selection, direct simulator evaluation,
+   OPE, and the planning-gain summary.
+6. [Configuration](configuration.md): how a run config is resolved from layers.
+7. [Command line and artifacts](operations.md): every `bench` command and the
+   files a run writes.
+8. [Extending](extending.md): adding an environment or an algorithm.
+9. [DreamerV3 fidelity audit](dreamer-fidelity.md).
+10. [Technical specification](paper/main.tex): the benchmark in paper form,
+    without empirical results.
 
-The descriptions distinguish three things throughout:
+Throughout, three things are kept apart:
 
-- **Source benchmark**: what the upstream repository and its paper define.
-- **Suite integration**: the API, data format, and configuration used here.
+- **Source benchmark**: what the upstream environment and its paper define.
+- **Integration**: the adapter, dataset schema, and configuration used here.
 - **Local algorithms**: methods implemented in this repository, which are not
-  necessarily the same algorithms reported in the source papers.
-
-This distinction matters particularly for EpiCare: its source paper reports
-AWAC, EDAC, TD3+BC, IQL, CQL, BC, and DQN, whereas this suite currently runs
-DQN, PPO, three world-model/CEM variants, and the offline DreamerV3-style agent
-on the EpiCare environment.
+  necessarily the ones reported in the source papers. EpiCare's paper, for
+  example, reports AWAC, EDAC, TD3+BC, IQL, CQL, BC, and DQN; BenchTWM runs its
+  own BC, DQN, IQL, CQL, three CEM world models, and a DreamerV3-style agent.

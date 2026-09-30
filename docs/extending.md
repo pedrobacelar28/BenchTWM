@@ -1,70 +1,65 @@
 # Extending BenchTWM
 
-The extension boundary is explicit: adapters define environments, algorithm
-registrations define learning, and `configs/catalog.json` defines what users
-can run. Do not add a command-specific code path for a new benchmark.
+Environments and algorithms are registries. Adding one never requires editing
+the training loop, the evaluator, the CLI, or the catalog.
 
-## Add an Environment
+## Add an environment
 
-1. Vendor only the runtime core under `third_party/<environment>/`, preserving
-   its upstream license and a local `NOTICE` describing modifications.
-2. Implement `src/envs/<environment>_adapter.py` as `EnvAdapter` and declare a
-   complete `EnvSpec`: observation backends, action labels/geometry, features,
-   named metrics, and primary metric.
-3. Register a stable `env_id` and constructor in `src/envs/factory.py`.
-4. Add behavior-policy collection support in `src/offline/generate_dataset.py`.
-   It must sample actions from a known distribution and record exact
-   `behavior_logprobs`.
-5. Add reference-policy support in `src/envs/reference.py` only when the
-   environment genuinely declares baseline policies.
-6. Add dataset recipes under `configs/datasets/<environment>/`, method recipes
-   under `configs/recipes/<environment>/`, and public IDs in `configs/catalog.json`.
-7. Run `python scripts/bench.py validate --smoke`, then add reset,
-   dataset-schema, propensity, offline/online, OPE, and report tests.
+1. **Vendor the runtime** under `third_party/<name>/` with its license and a
+   `NOTICE` listing local modifications. If it is a Python package, add its
+   directory to `where` in `pyproject.toml`
+   (`[tool.setuptools.packages.find]`) and to the pytest `pythonpath`.
+2. **Write `benchtwm/envs/<env_id>.py`**: an `EnvAdapter` subclass decorated
+   with `@register_env` that sets `env_id`, `behavior_policy_ids` (stable
+   integer ids), and `reference_policies`, and implements `from_config`,
+   `reset`, `step`, `spec`, `transition_metrics`, `episode_metrics`, and
+   `make_policy`. Observations are `float32` vectors; `info` must contain
+   `action_mask`, `admissible_actions`, and a diagnostic `state_id`. Never
+   expose privileged hidden state as an observation.
+3. **Import the module** at the bottom of `benchtwm/envs/__init__.py`.
+4. **Add `configs/envs/<env_id>.json`** (`slug`, `label`, `description`,
+   `action_type`, and a `run` block with `env_kwargs`, `environment_seed`,
+   `gamma`) and **`configs/datasets/<env_id>.json`** (seed, `ope_enabled`,
+   `tiers`, `behaviors`).
+5. **Add a tiny dataset entry** for it in `TINY_DATASETS` in
+   `tests/conftest.py`.
 
-An adapter must never expose privileged latent state as an agent observation.
-It may export diagnostic IDs only as explicitly documented analysis fields.
+`tests/test_envs.py` then checks the new environment's spec, reset
+determinism, behavior-policy distributions, reference evaluation, dataset
+schema, propensities, split separation, and collection determinism, and
+`tests/test_algorithms.py` trains every algorithm on it.
 
-## Add an Algorithm
+Behavior policies are `Policy` subclasses (`benchtwm/policies.py`) that return
+a probability vector over actions; collection samples from it and records the
+exact log-propensity, so OPE works for every dataset.
 
-1. Implement `train(config, output_dir)` and `load_policy(config, checkpoint)`
-   under `src/algorithms/`.
-2. Return `metrics`, `checkpoint_last`, and `checkpoint_best`. Checkpoints must
-   remain serializable with `torch.save`.
-3. The loaded policy must implement `act(obs, info, deterministic=True)` and
-   `action_probabilities(obs, info, deterministic=True)`.
-4. Respect `obs_backend` and `action_mask`; algorithms may not import a concrete
-   environment adapter.
-5. Register online training/loading in `src/algorithms/registry.py`. Register a
-   fixed-data trainer in `src/offline/trainers.py` when offline learning is
-   supported.
-6. Add a method recipe for each compatible environment/backend/tier and a
-   catalog method ID. Keep CEM geometry variants separate public methods.
-7. Add a dev smoke test and include OPE coverage whenever the method provides
-   action probabilities.
+## Add an algorithm
 
-## Recipe Contract
+1. **Write `benchtwm/algorithms/<name>.py`**: an `OfflineAlgorithm` subclass
+   decorated with `@register_algorithm` that sets `name`, `method_id`,
+   `family` (`MODEL_FREE` or `MODEL_BASED`), `description`, and
+   `validation_objective`, and implements `build`, `loss`, and `make_policy`.
+   Override `after_update`, `batches`, `update`, `validate`, `state_dict`, or
+   `tuning_space` only when needed (see `dqn.py`, `world_models.py`, and
+   `dreamer/` for each case).
+2. **Import the module** at the bottom of `benchtwm/algorithms/__init__.py`.
+3. **Add `configs/algorithms/<name>.json`** with its default hyperparameters,
+   and `configs/overrides/<env_id>/<name>.json` for environment-specific
+   values.
+4. **Add tiny hyperparameters** in `TINY_HYPERPARAMETERS` in
+   `tests/conftest.py`.
 
-Every canonical recipe states the generic environment contract explicitly:
+The policy returned by `make_policy` must respect `info["action_mask"]` and
+return a probability vector from `action_probabilities`; set
+`ope_probability_contract` to `diagnostic` if those probabilities are not
+those of a fixed stochastic policy. The contract tests train, checkpoint,
+reload, and run end to end on every environment.
 
-```json
-{
-  "schema_version": 1,
-  "env_id": "epicare",
-  "environment_seed": 1,
-  "env_kwargs": {},
-  "obs_backend": "state_vector",
-  "algo": "dqn",
-  "seed": [0]
-}
-```
-
-The catalog supplies dataset paths, the chosen scalar seed, run identity, and
-artifact location at runtime. Do not embed output paths in recipes. Validate a
-new catalog entry before execution:
+## Checklist
 
 ```bash
-python scripts/bench.py validate
-python scripts/bench.py dataset show <dataset-id>
-python scripts/bench.py train <dataset-id> <method-id> --dry-run
+bench validate --smoke
+bench catalog
+bench train <dataset> <method> --dry-run
+pytest
 ```

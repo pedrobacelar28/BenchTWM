@@ -1,109 +1,103 @@
 # BenchTWM
 
-BenchTWM is an offline-first benchmark suite for structured reinforcement
-learning and world models. It currently provides ICU-Sepsis and EpiCare under
-one dataset, training, direct-evaluation, OPE, and artifact contract.
+BenchTWM is an offline benchmark for reinforcement learning and world models
+on structured decision data. It asks whether **model-based methods (learned
+world models with planning) beat model-free offline RL** when every policy
+must be learned from logged data alone, as it would be in a hospital or a
+company that cannot experiment on live users.
+
+Every run follows the same protocol: train on a fixed logged dataset, select
+the checkpoint with an offline validation loss, then measure the deployed
+policy twice, by direct simulator evaluation and by held-out off-policy
+evaluation (OPE). The simulator is never used for training or model selection.
 
 It is research software, not a clinical decision-support system.
 
-## Start Here
+## Contents
 
-Install the dependencies listed in `requirements.txt` in your Python
-environment, then run every command from the repository root.
+| Environments | Observation | Actions |
+|---|---|---|
+| `icu_sepsis`: ICU-Sepsis MDP estimated from MIMIC-III | 47 named clinical features | 25 (5x5 fluid/vasopressor grid, admissibility masks) |
+| `epicare`: longitudinal-treatment POMDP | 8 symptom intensities | 16 treatments |
 
-```bash
-# Check the local environment, GPU visibility, and vendored benchmark cores.
-python scripts/bench.py doctor
-
-# See exactly which offline datasets and methods are available.
-python scripts/bench.py catalog
-
-# Generate the small EpiCare SMART dataset, including held-out OPE data.
-python scripts/bench.py dataset build epicare/smart/dev
-
-# Inspect schema, behavior-policy provenance, splits, and arrays.
-python scripts/bench.py inspect dataset epicare/smart/dev
-
-# Preview the resolved offline DQN run before spending compute.
-python scripts/bench.py train epicare/smart/dev dqn --dry-run
-
-# Train, evaluate in the simulator, and compute OPE when configured.
-python scripts/bench.py train epicare/smart/dev dqn
-
-# Find the run, inspect its separate evidence streams, and write a report.
-python scripts/bench.py status
-python scripts/bench.py inspect run <run-id-or-path>
-python scripts/bench.py report <run-id-or-path>
-```
-
-Offline training is the default. `train` never creates data implicitly: when a
-dataset is missing it prints the `dataset build` command required to prepare
-the logged train/validation/OPE splits.
-
-## Main Commands
-
-| Command | Purpose |
+| Family | Methods |
 |---|---|
-| `doctor` | Verify dependencies, local cores, CUDA, and artifact root. |
-| `catalog` | List curated dataset IDs, method compatibility, scale, and OPE support. |
-| `dataset list\|show\|build` | Discover, inspect, and generate offline data. |
-| `train` | Run one resolved offline or explicit online recipe. |
-| `suite` | Preview or execute a local multi-method/multi-seed queue. |
-| `status`, `inspect`, `report` | Recover evidence and artifacts without opening Python. |
-| `evaluate`, `ope`, `baselines` | Run fresh simulator evaluation, held-out OPE, or environment baselines. |
-| `research` | Run explicit sweeps, matrices, Optuna tuning, collection, and re-evaluation. |
-| `validate` | Validate the catalog and optionally smoke-test each environment. |
+| model-free | `bc`, `dqn`, `iql`, `cql` |
+| model-based | `raw-model`, `latent-model`, `reconstructive-model` (world model + CEM planning), `dreamer` (DreamerV3-style) |
 
-Use `--dry-run` before commands that write or consume significant compute.
-Inspection commands support `--json`, for example:
+Each environment has four behavior policies and two size tiers (`dev` for
+quick iteration, `final` for reported results), giving 16 datasets such as
+`icu-sepsis/expert/dev` or `epicare/smart/final`. Every method runs on every
+dataset.
+
+## Install
 
 ```bash
-python scripts/bench.py catalog --json
-python scripts/bench.py status --json
+pip install -r requirements.txt    # pinned reference versions
+pip install -e . --no-deps         # benchtwm + the vendored ICU-Sepsis and EpiCare cores
 ```
 
-## Artifact Layout
+This installs the `bench` command (also available as `python -m benchtwm`).
 
-New generated files are ignored by Git and live only under `artifacts/`:
+## Quick start
+
+```bash
+bench doctor                                  # dependencies, GPUs, registered components
+bench catalog                                 # datasets and methods
+bench dataset build epicare/smart/dev         # collect train/val/OPE splits
+bench train epicare/smart/dev dqn --dry-run   # show the resolved plan
+bench train epicare/smart/dev dqn             # train, evaluate, OPE
+bench suite epicare/smart/dev --seeds 0,1,2 --execute   # every method, three seeds
+bench research summarize                      # per-method statistics and planning gain
+```
+
+`train` never builds data implicitly; a missing dataset prints the
+`dataset build` command to run.
+
+## Repository layout
 
 ```text
-artifacts/
-  datasets/<dataset-id>/{train,val,ope_test}.npz
-  runs/<env>/<dataset>/<mode>/<method>/seed-<n>--<hash>/
-  queues/<timestamp>/{jobs,logs,progress,queue_manifest.json,suite_results.json}
-  reports/
-  studies/
+benchtwm/
+  envs/          environment registry and one module per environment
+  algorithms/    algorithm registry and one module per method
+  data/          dataset schema, loading, and collection
+  training.py    the single offline training loop
+  evaluation.py  direct simulator evaluation
+  ope.py         importance-sampling OPE
+  runner.py      one run: train -> evaluate -> OPE -> artifacts
+  config.py      layered configs and the derived catalog
+  operations/    artifacts, local queue, reports, summaries
+  cli/           the `bench` command
+configs/         protocol, per-algorithm defaults, environments, datasets, overrides
+tests/           contract tests over every environment and algorithm, plus unit tests
+third_party/     vendored ICU-Sepsis and EpiCare runtimes (see THIRD_PARTY_NOTICES.md)
+docs/            documentation
+artifacts/       generated datasets, runs, queues, reports (git-ignored)
 ```
 
-Each run stores `run_manifest.json`, its resolved `config.json`, checkpoints,
-optimization histories, simulator evaluation, and optional OPE outputs. The
-manifest records the recipe, config fingerprint, code revision, Python, Torch,
-device, and lifecycle state.
+## Adding environments and algorithms
 
-The clean interface reads and writes only the versioned `artifacts/` layout;
-legacy outputs are outside the benchmark protocol and are not included in
-reports.
+An environment is one module in `benchtwm/envs/` plus `configs/envs/<id>.json`
+and `configs/datasets/<id>.json`. An algorithm is one module in
+`benchtwm/algorithms/` plus `configs/algorithms/<name>.json`. The contract
+tests pick up new registrations automatically. See
+[docs/extending.md](docs/extending.md).
 
-## Examples and Documentation
+## Documentation
 
-- [Examples](examples/README.md)
-- [CLI and operations](docs/operations.md)
-- [Recipes and research](docs/recipes.md)
-- [Benchmark and environment contract](docs/benchmarks.md)
-- [Offline data schema](docs/data-schema.md)
-- [Training, direct evaluation, and OPE](docs/evaluation.md)
-- [Adding an environment or algorithm](docs/extending.md)
+- [Environments](docs/environments.md) and [datasets](docs/datasets.md)
+- [Data schema](docs/data-schema.md)
+- [Algorithms](docs/algorithms.md)
+- [Evaluation protocol](docs/evaluation.md)
+- [Configuration](docs/configuration.md)
+- [Command line and artifacts](docs/operations.md)
+- [Extending the benchmark](docs/extending.md)
+- [DreamerV3 fidelity audit](docs/dreamer-fidelity.md)
 - [Technical specification](docs/paper/main.tex)
+- [Candidate structured environments and datasets](CATALOGO_AMBIENTES.md) (research notes, Portuguese)
 
-## Repository Layout
+## Tests
 
-```text
-src/            Environments, algorithms, data, evaluation, and operations
-configs/        Versioned catalog, dataset recipes, method recipes, research matrices
-scripts/        The single CLI entry point: bench.py
-analysis/       Notes for downstream analysis using exported artifacts
-examples/       Small shell and Python workflows
-docs/           Operational and technical documentation
-tests/          Unit, integration, and smoke tests
-third_party/    Vendored runtime benchmark cores and notices
+```bash
+pytest
 ```

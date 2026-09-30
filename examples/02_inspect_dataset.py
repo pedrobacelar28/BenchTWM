@@ -1,21 +1,17 @@
-"""Read a canonical offline dataset without invoking a trainer."""
-
-from pathlib import Path
+"""Read a built dataset without invoking a trainer."""
 
 import numpy as np
 
+from benchtwm.data.dataset import OfflineTransitionDataset
+from benchtwm.paths import DEFAULT_ARTIFACT_ROOT
 
-dataset_root = Path("artifacts/datasets/epicare/smart/dev")
-metadata = dataset_root / "metadata.json"
-train = dataset_root / "train.npz"
+path = DEFAULT_ARTIFACT_ROOT / "datasets" / "epicare" / "smart" / "dev" / "train.npz"
+if not path.exists():
+    raise SystemExit("Build it first: bench dataset build epicare/smart/dev")
 
-if not train.exists():
-    raise SystemExit("Build it first: python scripts/bench.py dataset build epicare/smart/dev")
-
-data = np.load(train)
-print("arrays:", sorted(data.files))
-print("transitions:", int(data["actions"].shape[0]))
-print("episodes:", int(np.unique(data["episode_ids"]).size))
-print("state-vector shape:", tuple(data["state_vectors"].shape))
-print("behavior log-probabilities finite:", bool(np.isfinite(data["behavior_logprobs"]).all()))
-print("metadata:", metadata)
+dataset = OfflineTransitionDataset(path)
+print("arrays:", sorted(dataset.data))
+print("transitions:", len(dataset), "| episodes:", dataset.num_episodes)
+print("features:", dataset.feature_names)
+print("actions:", dataset.num_actions)
+print("behavior log-propensities finite:", bool(np.isfinite(dataset.data["behavior_logprobs"]).all()))

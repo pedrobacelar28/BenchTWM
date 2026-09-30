@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+# Build a small dataset, inspect a training plan, then train, evaluate, and run OPE.
 set -euo pipefail
 
-python scripts/bench.py doctor
-python scripts/bench.py dataset build epicare/smart/dev --dry-run
-python scripts/bench.py dataset build epicare/smart/dev
-python scripts/bench.py train epicare/smart/dev dqn --dry-run
-python scripts/bench.py train epicare/smart/dev dqn
-python scripts/bench.py status
+bench doctor
+bench dataset build epicare/smart/dev --dry-run
+bench dataset build epicare/smart/dev
+bench train epicare/smart/dev dqn --dry-run
+bench train epicare/smart/dev dqn
+bench status

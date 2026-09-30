@@ -2,6 +2,8 @@
 
 Versão de 30/09/2026. Cerca de 120 candidatos foram verificados em fontes primárias: paper, código do repositório, página de download e, em vários casos, os próprios dados baixados e medidos. Quando algo não pôde ser verificado, isso está dito na seção 12.
 
+> **Atualização (refatoração do repositório):** os ambientes DTR foram removidos por decisão do projeto; os controles não tabulares passam a ser só **ICU-Sepsis e EpiCare**. O modo online também foi removido, e o protocolo já é 100% offline (itens 9 e 10 da seção 9 resolvidos). O código agora vive em `benchtwm/` (antes `zmain_repo/src/`); os caminhos da seção 9 foram atualizados.
+
 ---
 
 ## 0. Resumo
@@ -520,16 +522,16 @@ ICU-Sepsis, EpiCare, DTR AhnChemo e DTR GhaffariCancer. Detalhes na seção 3. O
 
 | # | Mudança | Por quê | Onde |
 |---|---|---|---|
-| 1 | **Schema v3 com features tipadas** (tipo, cardinalidade, máscara de faltantes, arrays separados para numéricas e categóricas) | hoje só existe `float32 (N, d)` | `src/offline/dataset.py`, `generate_dataset.py`, `docs/data-schema.md` |
-| 2 | **`EnvSpec.feature_schema`** | cada adaptador declara os tipos | `src/envs/base.py` |
-| 3 | **Encoder tabular compartilhado** (embedding de categóricas, normalização por quantis, flag de faltante) | as redes atuais recebem o vetor cru, sem normalizar | `src/models/` |
-| 4 | **Ações contínuas** | IB, WaterWorks, CityLearn, MABIM, SalesPromotion, gym-DSSAT e AuctionNet têm ações contínuas | schema, trainers, planejador CEM (versão gaussiana), TD3+BC |
-| 5 | **Adaptador genérico para simulador aprendido** (carregar um modelo, reset a partir de estados iniciais dos dados) | NeoRL, DIEN, HIV, KDD98 | `src/envs/` |
-| 6 | **Importador de datasets externos** (NeoRL `.npz`, RL4RS CSV, IB pickles) | nem todo dado é gerado pelo repo | `src/offline/` |
-| 7 | **OPE com probabilidades externas** (ler colunas de propensão dos logs) | RL4RS, Starbucks, Drink Less | `src/offline/ope.py` |
-| 8 | **Métricas de fidelidade por tipo** (RMSE para numéricas, log-loss/acurácia para categóricas, calibração para binárias) | camada (d) | `src/evaluation.py` |
-| 9 | **Travas do protocolo offline** (bloquear avaliação no simulador durante a seleção; marcar resultados online como "referência") | seção 7 | `src/operations/` |
-| 10 | Corrigir o comportamento do **DQN no AhnChemo** | é pior que a política que gerou os dados | investigar escala das features e recompensa |
+| 1 | **Features tipadas no schema** (tipo, cardinalidade, máscara de faltantes, arrays separados para numéricas e categóricas) | hoje só existe `float32 (N, d)` | `benchtwm/data/collect.py`, `benchtwm/data/dataset.py`, `docs/data-schema.md` |
+| 2 | **`EnvSpec.feature_schema`** | cada adaptador declara os tipos | `benchtwm/envs/base.py` |
+| 3 | **Encoder tabular compartilhado** (embedding de categóricas, normalização por quantis, flag de faltante) | as redes atuais recebem o vetor cru, sem normalizar | `benchtwm/algorithms/networks.py` |
+| 4 | **Ações contínuas** | IB, WaterWorks, CityLearn, MABIM, SalesPromotion, gym-DSSAT e AuctionNet têm ações contínuas | schema, `benchtwm/algorithms/`, planejador CEM (versão gaussiana), TD3+BC |
+| 5 | **Adaptador genérico para simulador aprendido** (carregar um modelo, reset a partir de estados iniciais dos dados) | NeoRL, DIEN, HIV, KDD98 | `benchtwm/envs/` |
+| 6 | **Importador de datasets externos** (NeoRL `.npz`, RL4RS CSV, IB pickles) | nem todo dado é gerado pelo repo | `benchtwm/data/` |
+| 7 | **OPE com probabilidades externas** (ler colunas de propensão dos logs) | RL4RS, Starbucks, Drink Less | `benchtwm/ope.py` |
+| 8 | **Métricas de fidelidade por tipo** (RMSE para numéricas, log-loss/acurácia para categóricas, calibração para binárias) | camada (d) | `benchtwm/evaluation.py` |
+| 9 | ~~Travas do protocolo offline~~ | **feito**: o modo online foi removido e o simulador não é usado no treino nem na seleção de modelo | `benchtwm/training.py` |
+| 10 | ~~Corrigir o DQN no AhnChemo~~ | **não se aplica**: o DTR foi removido | — |
 
 **Ordem sugerida:**
 1. (1–3), com o **gerador sintético próprio** como primeiro ambiente novo: é o mais barato e valida o schema.

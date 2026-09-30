@@ -1,14 +1,14 @@
-# Research Recipes
+# Research Matrices
 
-Research definitions are small JSON matrices over catalog dataset IDs, public
-method IDs, and explicit seeds. Run one with:
+A matrix is a JSON file with `datasets`, optional `methods` (default: every
+compatible method), and `seeds`; or a list of such blocks under `jobs`.
 
 ```bash
-python scripts/bench.py research matrix configs/research/v0-offline-matrix.json --execute
-python scripts/bench.py research summarize
+bench research matrix configs/research/dev-matrix.json             # print the plan
+bench research matrix configs/research/dev-matrix.json --execute   # run it
+bench research summarize
 ```
 
-Use `research sweep` for one method across seeds and `research tune` for the
-Optuna search space declared by the CLI for that algorithm family. The v0
-matrix has exactly two tasks, four direct baselines, three provisional
-planning methods per environment, and seeds `0,1,2`.
+- `dev-matrix.json`: every method on the main behavior dataset of each
+  environment (`epicare/smart/dev`, `icu-sepsis/expert/dev`), seeds 0-2.
+- `final-matrix.json`: every method on every `final` dataset, seeds 0-2.

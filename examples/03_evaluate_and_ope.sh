@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Re-evaluate a completed run in the simulator, recompute OPE, and write a report.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -7,7 +8,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 run="$1"
-python scripts/bench.py inspect run "$run"
-python scripts/bench.py evaluate "$run" --episodes 500
-python scripts/bench.py ope "$run" --bootstrap 500
-python scripts/bench.py report "$run"
+bench inspect run "$run"
+bench evaluate "$run" --episodes 500
+bench ope "$run" --bootstrap 500
+bench report "$run"

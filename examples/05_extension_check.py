@@ -1,23 +1,16 @@
-"""Minimal preflight used after registering a new environment or algorithm."""
+"""Check the registries and configs after adding an environment or algorithm."""
 
-import sys
-from pathlib import Path
+from benchtwm.algorithms import algorithms
+from benchtwm.config import Benchmark
+from benchtwm.envs import environment_ids
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
-
-from benchtwm.operations.catalog import Catalog
-
-
-catalog = Catalog.load()
-errors = catalog.validate()
+bench = Benchmark.load()
+errors = bench.validate()
 if errors:
     raise SystemExit("\n".join(errors))
 
-for dataset in catalog.datasets:
-    methods = catalog.compatible_methods(dataset.identifier, mode="offline")
-    print(dataset.identifier, "->", ", ".join(method.method_id for method in methods))
-
-print("Catalog is valid. Run: python scripts/bench.py validate --smoke")
+print("environments:", ", ".join(environment_ids()))
+print("algorithms:", ", ".join(f"{cls.method_id} ({cls.family})" for cls in algorithms()))
+for dataset in bench.datasets:
+    print(dataset.identifier, "->", ", ".join(method.method_id for method in bench.methods(dataset.identifier)))
+print("Configuration is valid. Next: bench validate --smoke && pytest")
