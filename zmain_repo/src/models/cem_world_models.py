@@ -18,12 +18,10 @@ class RawDynamicsModel(nn.Module):
         num_actions: int,
         hidden_dim: int,
         action_embed_dim: int,
-        discrete_obs: bool,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.num_actions = int(num_actions)
-        self.discrete_obs = bool(discrete_obs)
         self.action_embed_dim = int(action_embed_dim)
         self.action_embedding = nn.Embedding(num_actions, action_embed_dim)
         self.predictor = build_mlp(obs_dim + action_embed_dim, [hidden_dim, hidden_dim], obs_dim)
@@ -37,10 +35,9 @@ class RawDynamicsModel(nn.Module):
         action_embed = self.action_embedding(action)
         joint = torch.cat([obs, action_embed], dim=-1)
         prediction = self.predictor(joint)
-        next_state = torch.softmax(prediction, dim=-1) if self.discrete_obs else prediction
         return {
             "prediction": prediction,
-            "next_state": next_state,
+            "next_state": prediction,
             "reward": self.reward_head(joint).squeeze(-1),
             "continue_logit": self.continue_head(joint).squeeze(-1),
         }

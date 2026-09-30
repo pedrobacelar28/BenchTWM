@@ -32,7 +32,7 @@ def _dataset_config(output_dir: Path, policy: str = "random_admissible", seed: i
     return config
 
 
-def _offline_common(ds_dir: Path, algo: str, obs_backend: str = "discrete_id") -> dict:
+def _offline_common(ds_dir: Path, algo: str, obs_backend: str = "state_vector") -> dict:
     return {
         "algo": algo,
         "train_mode": "offline",
@@ -57,21 +57,10 @@ def _offline_common(ds_dir: Path, algo: str, obs_backend: str = "discrete_id") -
     }
 
 
-def _tiny_offline_config(ds_dir: Path, algo: str, obs_backend: str = "discrete_id") -> dict:
+def _tiny_offline_config(ds_dir: Path, algo: str, obs_backend: str = "state_vector") -> dict:
     common = _offline_common(ds_dir, algo, obs_backend=obs_backend)
     if algo == "dqn":
         return {**common, "learning_rate": 0.01, "tau": 0.5, "target_network_frequency": 1}
-    if algo == "ppo":
-        return {
-            **common,
-            "learning_rate": 0.01,
-            "clip_coef": 0.2,
-            "vf_coef": 0.5,
-            "ent_coef": 0.01,
-            "max_grad_norm": 0.5,
-            "norm_adv": True,
-            "offline_bc_weight": 0.1,
-        }
     if algo in {"raw_model", "latent_model", "reconstructive_model"}:
         config = {
             **common,
@@ -141,7 +130,7 @@ class TestOfflinePipeline(unittest.TestCase):
             ds = OfflineTransitionDataset(out / "train.npz", obs_backend="state_vector", seed=0)
             batch = ds.sample(3)
             self.assertEqual(batch.obs.shape[0], 3)
-            self.assertNotEqual(batch.obs.shape[1], ds.num_states)
+            self.assertEqual(batch.obs.shape[1], 47)
             episode_batch = ds.episode_batch(0, ds.num_episodes + 1, shuffle=False)
             self.assertGreaterEqual(episode_batch.action.shape[0], ds.size)
 
@@ -169,13 +158,9 @@ class TestOfflinePipeline(unittest.TestCase):
             ds_dir = Path(tmp) / "ds"
             generate_dataset(_dataset_config(ds_dir, policy="epsilon_expert"))
             variants = [
-                ("dqn", "discrete_id"),
-                ("ppo", "discrete_id"),
-                ("raw_model", "discrete_id"),
+                ("dqn", "state_vector"),
                 ("raw_model", "state_vector"),
-                ("latent_model", "discrete_id"),
                 ("latent_model", "state_vector"),
-                ("reconstructive_model", "discrete_id"),
                 ("reconstructive_model", "state_vector"),
             ]
             for algo, obs_backend in variants:
@@ -184,8 +169,6 @@ class TestOfflinePipeline(unittest.TestCase):
                     self.assertIn("metrics", result)
                     self.assertEqual(len(result["metrics"]["returns"]), 2)
                     self.assertIn("checkpoint_best", result)
-                    if algo == "ppo":
-                        self.assertIn("behavior_logprobs", np.load(ds_dir / "train.npz").files)
 
     def test_early_stopping_triggers_from_validation_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,15 +222,6 @@ class TestOfflinePipeline(unittest.TestCase):
             self.assertIn("validation_rollout1_state_error", extra)
             self.assertIn("validation_rollout5_discounted_return_error", extra)
             self.assertIn("validation_rollout5_cumulative_state_error", extra)
-
-    def test_legacy_episode_budget_config_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ds_dir = Path(tmp) / "ds"
-            generate_dataset(_dataset_config(ds_dir))
-            config = _tiny_offline_config(ds_dir, "dqn")
-            config["offline_train_episodes"] = 4
-            with self.assertRaisesRegex(ValueError, "step-based"):
-                get_offline_trainer("dqn")(config, Path(tmp))
 
     def test_runner_writes_offline_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

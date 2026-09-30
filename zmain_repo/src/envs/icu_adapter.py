@@ -16,10 +16,8 @@ from src.envs.base import EnvAdapter, EnvSpec
 
 
 class ICUSepsisEnvWrapper(EnvAdapter):
-    def __init__(self, obs_backend: str = "discrete_id", seed: int | None = None, params=None):
-        if obs_backend not in {"discrete_id", "state_vector"}:
-            raise ValueError(f"Unsupported obs_backend={obs_backend}")
-        self.obs_backend = obs_backend
+    def __init__(self, seed: int | None = None, params=None):
+        self.obs_backend = "state_vector"
         self.env = gym.make("Sepsis/ICU-Sepsis-v2", params=params) if params is not None else gym.make("Sepsis/ICU-Sepsis-v2")
         obs, info = self.env.reset(seed=seed)
         self._num_states = int(self.env.observation_space.n)
@@ -29,10 +27,10 @@ class ICUSepsisEnvWrapper(EnvAdapter):
             env_id="icu_sepsis",
             num_states=self._num_states,
             num_actions=self._num_actions,
-            obs_dim=self._num_states if obs_backend == "discrete_id" else self._state_vector_dim,
+            obs_dim=self._state_vector_dim,
             state_vector_dim=self._state_vector_dim,
-            obs_backend=obs_backend,
-            supported_obs_backends=("discrete_id", "state_vector"),
+            obs_backend="state_vector",
+            supported_obs_backends=("state_vector",),
             action_labels=tuple(f"Fluid {fluid}; Vaso {vaso}" for fluid in range(ACTION_LEVELS) for vaso in range(ACTION_LEVELS)),
             feature_names=tuple(f"state_vector_{idx}" for idx in range(self._state_vector_dim)),
             metric_names=("sofa_score",),
@@ -56,14 +54,7 @@ class ICUSepsisEnvWrapper(EnvAdapter):
     def close(self) -> None:
         self.env.close()
 
-    def one_hot(self, state_id: int) -> np.ndarray:
-        vector = np.zeros(self.num_states, dtype=np.float32)
-        vector[int(state_id)] = 1.0
-        return vector
-
     def transform_obs(self, state_id: int, info: dict) -> np.ndarray:
-        if self.obs_backend == "discrete_id":
-            return self.one_hot(state_id)
         return np.asarray(info["state_vector"], dtype=np.float32)
 
     def action_mask(self, info: dict) -> np.ndarray:

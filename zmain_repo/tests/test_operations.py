@@ -12,8 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.bench import _early_stopping_plan, _offline_preflight, _ope_plan
-from src.algorithms.common import TrainLogger
-from src.algorithms.registry import get_policy_loader, get_trainer_for_mode
+from src.algorithms.registry import get_policy_loader, get_trainer
 from src.operations.artifacts import initial_manifest, run_directory, write_manifest
 from src.operations.catalog import Catalog, apply_overrides, parse_overrides
 from src.operations.queue import _write_suite_results
@@ -26,10 +25,10 @@ class TestOperations(unittest.TestCase):
         self.assertEqual(catalog.validate(), [])
         self.assertEqual(
             {dataset.env_id for dataset in catalog.datasets},
-            {"icu_sepsis", "epicare", "dtr-ahn-chemo", "dtr-ghaffari-cancer"},
+            {"icu_sepsis", "epicare"},
         )
         self.assertIn("dqn", [recipe.method_id for recipe in catalog.compatible_methods("epicare/smart/dev")])
-        self.assertIn("raw-model/discrete-cem", [recipe.method_id for recipe in catalog.compatible_methods("icu-sepsis/expert/dev")])
+        self.assertIn("raw-model/continuous-cem", [recipe.method_id for recipe in catalog.compatible_methods("icu-sepsis/expert/dev")])
 
     def test_catalog_materializes_explicit_paths_and_typed_overrides(self):
         catalog = Catalog.load()
@@ -37,7 +36,6 @@ class TestOperations(unittest.TestCase):
         params, dataset, recipe = catalog.run_config(
             "epicare/smart/dev",
             "dqn",
-            mode="offline",
             artifact_root="/tmp/bench-artifacts",
             seed=7,
             overrides=overrides,
@@ -80,20 +78,17 @@ class TestOperations(unittest.TestCase):
                 params, _, resolved = catalog.run_config(
                     matching_dataset.identifier,
                     recipe.method_id,
-                    mode=recipe.mode,
                     artifact_root="/tmp/bench-artifacts",
                 )
                 self.assertEqual(resolved.identifier, recipe.identifier)
-                self.assertIsNotNone(get_trainer_for_mode(params["algo"], recipe.mode))
+                self.assertIsNotNone(get_trainer(params["algo"]))
                 self.assertIsNotNone(get_policy_loader(params["algo"]))
 
     def test_public_offline_recipes_default_to_twenty_validation_checks_of_patience(self):
         catalog = Catalog.load()
         for recipe in catalog.recipes:
-            if recipe.mode != "offline":
-                continue
             dataset = next(item for item in catalog.datasets if item.env_id == recipe.env_id and item.tier == recipe.tier)
-            params, _, _ = catalog.run_config(dataset.identifier, recipe.method_id, mode=recipe.mode, artifact_root="/tmp/bench-artifacts")
+            params, _, _ = catalog.run_config(dataset.identifier, recipe.method_id, artifact_root="/tmp/bench-artifacts")
             self.assertEqual(params["early_stopping_patience"], 20, recipe.identifier)
 
     def test_clean_run_directory_and_manifest(self):
@@ -134,7 +129,6 @@ class TestOperations(unittest.TestCase):
             result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True, check=True)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["dataset_id"], "epicare/smart/dev")
-        self.assertEqual(payload["mode"], "offline")
         self.assertFalse(payload["preflight"]["ready"])
 
     def test_cli_reports_canonical_hyphenated_method_ids_without_traceback(self):
@@ -250,29 +244,6 @@ class TestOperations(unittest.TestCase):
         result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("--write-canonical is only valid", result.stderr)
-
-    def test_online_logger_uses_environment_success_and_action_geometry(self):
-        logger = TrainLogger(show_progress=False)
-        logger.log_episode(
-            1,
-            total_reward=3.0,
-            episode_length=2,
-            total_env_steps=2,
-            actions=[0, 15],
-            success=False,
-            action_distance=lambda previous, current: float(previous != current),
-            transition_metrics=[
-                {"symptom_burden": 0.8, "remission": 0.0},
-                {"symptom_burden": 0.4, "remission": 0.0},
-            ],
-            outcome={"success": False, "remission": False, "adverse_event": False},
-        )
-        payload = logger.metrics_payload()
-        self.assertEqual(payload["success_rate"].tolist(), [0.0])
-        self.assertEqual(payload["survival_rate"].tolist(), [0.0])
-        self.assertEqual(payload["action_stability_l1"].tolist(), [1.0])
-        self.assertAlmostEqual(payload["environment_metrics"]["mean_symptom_burden"][0], 0.6)
-        self.assertEqual(payload["environment_metrics"]["outcome_remission"].tolist(), [0.0])
 
 
 if __name__ == "__main__":

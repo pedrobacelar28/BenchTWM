@@ -15,7 +15,7 @@ from src.operations.catalog import Catalog
 from src.run_experiment import run_experiment
 
 
-def _write_dataset(path: Path, lengths=(5, 2), obs_dim=3, num_actions=5):
+def _write_dataset(path: Path, lengths=(5, 2), obs_dim=8, num_actions=16):
     path.parent.mkdir(parents=True, exist_ok=True)
     total = sum(lengths)
     observations = np.arange(total * obs_dim, dtype=np.float32).reshape(total, obs_dim) / 10.0
@@ -195,8 +195,8 @@ class TestDreamerIntegration(unittest.TestCase):
             self.assertTrue(np.isfinite(result["metrics"]["summary"]["best_validation_loss"]))
             load_config = {
                 **config,
-                "env_id": "dtr-ahn-chemo",
-                "env_kwargs": {"setting": 1, "max_t": 2},
+                "env_id": "epicare",
+                "env_kwargs": {"patient_modifiers": True},
             }
             policy = load_policy(load_config, result["checkpoint_best"])
             env = make_env(load_config, obs_backend="state_vector", seed=0)
@@ -217,8 +217,8 @@ class TestDreamerIntegration(unittest.TestCase):
             _write_dataset(ope_path, lengths=(2, 2))
             config = {
                 **_tiny_config(train_path, val_path),
-                "env_id": "dtr-ahn-chemo",
-                "env_kwargs": {"setting": 1, "max_t": 2},
+                "env_id": "epicare",
+                "env_kwargs": {"patient_modifiers": True},
                 "environment_seed": 1,
                 "ope_enabled": True,
                 "ope_dataset_path": str(ope_path),
@@ -243,13 +243,11 @@ class TestDreamerIntegration(unittest.TestCase):
             ):
                 self.assertTrue((run_dir / filename).exists(), filename)
 
-    def test_catalog_and_policy_contract_cover_all_four_environments(self):
+    def test_catalog_and_policy_contract_cover_all_environments(self):
         catalog = Catalog.load()
         datasets = [
             "epicare/soc/dev",
             "icu-sepsis/expert/dev",
-            "dtr-ahn-chemo/setting1/random/dev",
-            "dtr-ghaffari-cancer/setting1/random/dev",
         ]
         for dataset_id in datasets:
             self.assertIn("dreamer", [item.method_id for item in catalog.compatible_methods(dataset_id)])
@@ -257,8 +255,6 @@ class TestDreamerIntegration(unittest.TestCase):
         env_configs = [
             {"env_id": "icu_sepsis", "env_kwargs": {}},
             {"env_id": "epicare", "env_kwargs": {"patient_modifiers": True}},
-            {"env_id": "dtr-ahn-chemo", "env_kwargs": {"setting": 1, "max_t": 2}},
-            {"env_id": "dtr-ghaffari-cancer", "env_kwargs": {"setting": 1, "max_t": 2}},
         ]
         for raw in env_configs:
             with self.subTest(env_id=raw["env_id"]):

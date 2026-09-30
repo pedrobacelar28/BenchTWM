@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.algorithms.registry import get_policy_loader, get_trainer_for_mode
+from src.algorithms.registry import get_policy_loader, get_trainer
 from src.evaluation import evaluate_policy
 from src.offline.ope import evaluate_ope, export_ope
 from src.operations.artifacts import write_manifest
@@ -193,7 +193,7 @@ def run_experiment(
     """
 
     params = dict(params)
-    params.setdefault("train_mode", "online")
+    params.setdefault("train_mode", "offline")
     params.setdefault("method_id", method_id(params))
     update_progress(
         status="running",
@@ -234,7 +234,7 @@ def run_experiment(
         timing: dict[str, float] = {}
         optimization_started = time.perf_counter()
         _phase(params, f"optimization | algorithm={params['algo']} mode={train_mode(params)}")
-        trainer = get_trainer_for_mode(params["algo"], train_mode(params))
+        trainer = get_trainer(params["algo"])
         result = trainer(params, output_dir)
         timing["optimization_seconds"] = float(time.perf_counter() - optimization_started)
 
@@ -264,72 +264,70 @@ def run_experiment(
             torch.save(result["checkpoint_best"], output_dir / "checkpoint_best.pt")
 
         eval_result = None
-        should_run_final_eval = bool(params.get("save_trajectories", True)) or train_mode(params) == "offline"
-        if should_run_final_eval:
-            policy_loader = get_policy_loader(params["algo"])
-            best_checkpoint = result["checkpoint_best"]
-            policy = policy_loader(params, best_checkpoint)
-            evaluation_started = time.perf_counter()
-            _phase(params, f"direct evaluation | checkpoint=best episodes={int(params['eval_episodes'])}")
-            eval_result = evaluate_policy(
-                policy,
-                config=params,
-                num_episodes=int(params["eval_episodes"]),
-                eval_seed_base=int(params["eval_seed_base"]),
-                output_dir=output_dir,
-                checkpoint_name="best",
-                export_csv=bool(params.get("save_trajectories", True)),
-                show_progress=bool(params.get("show_progress", True)),
-                progress_desc="final_eval",
-            )
-            timing["evaluation_seconds"] = float(time.perf_counter() - evaluation_started)
-            update_progress(
-                status="running",
-                phase="evaluation",
-                method_id=params.get("method_id"),
-                total_steps=params.get("eval_episodes"),
-                step=params.get("eval_episodes"),
-                mean_return=eval_result["summary"].get("mean_return"),
-                mean_success=eval_result["summary"].get("mean_success"),
-            )
+        policy_loader = get_policy_loader(params["algo"])
+        best_checkpoint = result["checkpoint_best"]
+        policy = policy_loader(params, best_checkpoint)
+        evaluation_started = time.perf_counter()
+        _phase(params, f"direct evaluation | checkpoint=best episodes={int(params['eval_episodes'])}")
+        eval_result = evaluate_policy(
+            policy,
+            config=params,
+            num_episodes=int(params["eval_episodes"]),
+            eval_seed_base=int(params["eval_seed_base"]),
+            output_dir=output_dir,
+            checkpoint_name="best",
+            export_csv=bool(params.get("save_trajectories", True)),
+            show_progress=bool(params.get("show_progress", True)),
+            progress_desc="final_eval",
+        )
+        timing["evaluation_seconds"] = float(time.perf_counter() - evaluation_started)
+        update_progress(
+            status="running",
+            phase="evaluation",
+            method_id=params.get("method_id"),
+            total_steps=params.get("eval_episodes"),
+            step=params.get("eval_episodes"),
+            mean_return=eval_result["summary"].get("mean_return"),
+            mean_success=eval_result["summary"].get("mean_success"),
+        )
+        _phase(
+            params,
+            "direct evaluation complete | "
+            f"return={eval_result['summary'].get('mean_return', 0.0):.6f} "
+            f"success={eval_result['summary'].get('mean_success', 0.0):.6f}",
+        )
+        if bool(params.get("ope_enabled", False)) and params.get("ope_dataset_path"):
+            ope_started = time.perf_counter()
+            ope_deterministic = bool(params.get("ope_deterministic", params.get("eval_deterministic", True)))
+            ope_mode = "deployed_deterministic" if ope_deterministic else "deployed_stochastic"
             _phase(
                 params,
-                "direct evaluation complete | "
-                f"return={eval_result['summary'].get('mean_return', 0.0):.6f} "
-                f"success={eval_result['summary'].get('mean_success', 0.0):.6f}",
+                "held-out OPE | "
+                f"target={ope_mode} bootstrap={int(params.get('ope_bootstrap_replicates', 200))}",
             )
-            if bool(params.get("ope_enabled", False)) and params.get("ope_dataset_path"):
-                ope_started = time.perf_counter()
-                ope_deterministic = bool(params.get("ope_deterministic", params.get("eval_deterministic", True)))
-                ope_mode = "deployed_deterministic" if ope_deterministic else "deployed_stochastic"
-                _phase(
-                    params,
-                    "held-out OPE | "
-                    f"target={ope_mode} bootstrap={int(params.get('ope_bootstrap_replicates', 200))}",
-                )
-                ope_summary, ope_bootstrap = evaluate_ope(
-                    policy,
-                    dataset_path=params["ope_dataset_path"],
-                    obs_backend=params["obs_backend"],
-                    gamma=float(params.get("gamma", 1.0)),
-                    bootstrap_replicates=int(params.get("ope_bootstrap_replicates", 200)),
-                    seed=int(params.get("seed", 0)),
-                    deterministic=ope_deterministic,
-                    target_policy_mode=ope_mode,
-                    show_progress=bool(params.get("show_progress", True)),
-                    progress_desc="OPE",
-                )
-                ope_summary["task_id"] = str(params.get("task_id", task_id(params)))
-                ope_summary["track"] = str(params.get("track", benchmark_track(params)))
-                export_ope(ope_summary, ope_bootstrap, output_dir)
-                timing["ope_seconds"] = float(time.perf_counter() - ope_started)
-                reliability = ope_summary["reliability"]
-                _phase(
-                    params,
-                    "held-out OPE complete | "
-                    f"reliability={reliability['status']} ESS={ope_summary['diagnostics']['trajectory_ess']:.2f} "
-                    f"target_zero_rate={ope_summary['diagnostics']['target_zero_probability_rate']:.3f}",
-                )
+            ope_summary, ope_bootstrap = evaluate_ope(
+                policy,
+                dataset_path=params["ope_dataset_path"],
+                obs_backend=params["obs_backend"],
+                gamma=float(params.get("gamma", 1.0)),
+                bootstrap_replicates=int(params.get("ope_bootstrap_replicates", 200)),
+                seed=int(params.get("seed", 0)),
+                deterministic=ope_deterministic,
+                target_policy_mode=ope_mode,
+                show_progress=bool(params.get("show_progress", True)),
+                progress_desc="OPE",
+            )
+            ope_summary["task_id"] = str(params.get("task_id", task_id(params)))
+            ope_summary["track"] = str(params.get("track", benchmark_track(params)))
+            export_ope(ope_summary, ope_bootstrap, output_dir)
+            timing["ope_seconds"] = float(time.perf_counter() - ope_started)
+            reliability = ope_summary["reliability"]
+            _phase(
+                params,
+                "held-out OPE complete | "
+                f"reliability={reliability['status']} ESS={ope_summary['diagnostics']['trajectory_ess']:.2f} "
+                f"target_zero_rate={ope_summary['diagnostics']['target_zero_probability_rate']:.3f}",
+            )
         eval_summary = None if eval_result is None else eval_result["summary"]
         if eval_result is not None:
             timing.update(

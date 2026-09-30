@@ -1,4 +1,4 @@
-"""Offline trainers for fixed ICU-Sepsis transition datasets."""
+"""Offline trainers for fixed transition datasets."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from src.algorithms.cql import CQLPolicy
 from src.algorithms.dqn import DQNPolicy
 from src.algorithms.dreamer import DreamerPolicy
 from src.algorithms.iql import IQLPolicy
-from src.algorithms.ppo import PPOPolicy
 from src.evaluation import evaluate_policy
 from src.models.mlp import build_actor_critic, build_q_network
 from src.models.dreamer import DreamerAgent, DreamerConfig, DreamerOptimizer
@@ -71,25 +70,7 @@ class EarlyStoppingState:
     early_stop_reason: str = "disabled"
 
 
-LEGACY_EPISODE_KEYS = {
-    "offline_train_episodes",
-    "offline_batch_episodes",
-    "offline_log_interval_episodes",
-    "offline_eval_interval_episodes",
-    "offline_val_episodes",
-    "offline_val_batch_episodes",
-    "offline_shuffle_episodes",
-}
-
-
 def _validate_step_config(args) -> None:
-    legacy_keys = sorted(key for key in LEGACY_EPISODE_KEYS if hasattr(args, key))
-    if legacy_keys:
-        raise ValueError(
-            "Offline training is now step-based only. Remove legacy episode-budget fields "
-            f"{legacy_keys} and use offline_train_steps, offline_batch_size, "
-            "offline_log_interval, and offline_eval_interval."
-        )
     required = ["offline_train_steps", "offline_batch_size", "offline_log_interval", "offline_eval_interval"]
     missing = [key for key in required if not hasattr(args, key)]
     if missing:
@@ -555,16 +536,12 @@ def train_dqn(config: dict, output_dir):
     q_network = build_q_network(
         config,
         obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
     ).to(device)
     target_network = build_q_network(
         config,
         obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
     ).to(device)
     target_network.load_state_dict(q_network.state_dict())
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
@@ -639,120 +616,6 @@ def train_dqn(config: dict, output_dir):
         training_metadata=training_metadata,
     )
     return _final_result(metrics, {"model_state_dict": q_network.state_dict()}, early_stopping.best_checkpoint)
-
-
-def _ppo_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
-    newlogprob, entropy, value = agent.evaluate_actions(batch.obs, batch.action, batch.action_mask)
-    value = value.view(-1)
-    with torch.no_grad():
-        next_value = agent.get_value(batch.next_obs).view(-1)
-        returns = batch.reward + float(args.gamma) * next_value * (1.0 - batch.done)
-        advantages = returns - value.detach()
-        if bool(getattr(args, "norm_adv", True)) and advantages.numel() > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    logratio = torch.clamp(newlogprob - batch.behavior_logprob, min=-10.0, max=10.0)
-    ratio = logratio.exp()
-    pg_loss1 = -advantages * ratio
-    pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - float(args.clip_coef), 1.0 + float(args.clip_coef))
-    policy_loss = torch.max(pg_loss1, pg_loss2).mean()
-    value_loss = 0.5 * F.mse_loss(value, returns)
-    bc_loss = -newlogprob.mean()
-    entropy_loss = entropy.mean()
-    loss = (
-        policy_loss
-        + float(args.vf_coef) * value_loss
-        - float(args.ent_coef) * entropy_loss
-        + float(getattr(args, "offline_bc_weight", 0.1)) * bc_loss
-    )
-    return loss, {
-        "policy_loss": float(policy_loss.item()),
-        "value_loss": float(value_loss.item()),
-        "bc_loss": float(bc_loss.item()),
-        "entropy": float(entropy_loss.item()),
-    }
-
-
-def train_ppo(config: dict, output_dir):
-    args = SimpleNamespace(**config)
-    set_seed(args.seed)
-    device = get_torch_device()
-    train_dataset, val_dataset = _load_datasets(args, args.obs_backend)
-    agent = build_actor_critic(
-        config,
-        obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
-        num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
-    ).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-    train_history = []
-    eval_history = []
-    early_stopping = _make_early_stopping_state(args)
-
-    last_schedule = _schedule(args, train_dataset)
-    last_progress: OfflineProgress | None = None
-    for progress, batch, schedule in _training_batches(args, train_dataset, device, method_id(config)):
-        last_schedule = schedule
-        last_progress = progress
-        loss, info = _ppo_losses(agent, batch, args)
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(agent.parameters(), float(args.max_grad_norm))
-        optimizer.step()
-        _set_train_postfix(progress, float(loss.item()), {"policy": info["policy_loss"], "value": info["value_loss"]})
-        stop_due = False
-        if progress.log_due:
-            val_loss, val_info = _validation_loss(
-                val_dataset,
-                args,
-                device,
-                lambda val_batch: _ppo_losses(agent, val_batch, args),
-                progress=progress,
-                train_loss=float(loss.item()),
-            )
-            train_history.append(
-                {
-                    "step": progress.step,
-                    "sampled_transitions": progress.sampled_transitions,
-                    "loss": float(loss.item()),
-                    "validation_loss": float(val_loss),
-                    **info,
-                    **{f"validation_{key}": value for key, value in val_info.items()},
-                }
-            )
-            _set_train_postfix(progress, float(loss.item()), {"val_loss": val_loss})
-            improved, stop_due = _update_early_stopping(
-                early_stopping,
-                validation_loss=float(val_loss),
-                progress=progress,
-                checkpoint={"model_state_dict": agent.state_dict()},
-            )
-            _report_early_stopping(
-                args,
-                early_stopping,
-                progress=progress,
-                validation_loss=float(val_loss),
-                improved=improved,
-                stop_due=stop_due,
-            )
-        if progress.eval_due:
-            stats = _eval_stats(PPOPolicy(agent), config, progress, args)
-            eval_history.append(stats)
-            _set_train_postfix(progress, float(loss.item()), {"eval_return": stats["mean_return"]})
-        if stop_due:
-            break
-    training_metadata = _finalize_early_stopping(early_stopping, progress=last_progress, schedule=last_schedule)
-    metrics = _metrics_from_history(
-        train_history,
-        eval_history,
-        args,
-        config,
-        train_dataset,
-        val_dataset,
-        last_schedule,
-        training_metadata=training_metadata,
-    )
-    return _final_result(metrics, {"model_state_dict": agent.state_dict()}, early_stopping.best_checkpoint)
 
 
 def _bc_losses(agent, batch, args) -> tuple[torch.Tensor, dict]:
@@ -920,9 +783,7 @@ def train_bc(config: dict, output_dir):
     agent = build_actor_critic(
         config,
         obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
     )
     return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_bc_losses, make_policy=lambda a: BCPolicy(a), tag=method_id(config))
 
@@ -933,9 +794,7 @@ def train_iql(config: dict, output_dir):
     agent = build_iql_agent(
         config,
         obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
     )
     return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_iql_losses, make_policy=lambda a: IQLPolicy(a), tag=method_id(config))
 
@@ -946,9 +805,7 @@ def train_cql(config: dict, output_dir):
     agent = build_cql_agent(
         config,
         obs_dim=train_dataset.obs_dim,
-        num_states=train_dataset.num_states,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
     )
     return _train_offline_policy(config, output_dir, agent=agent, loss_fn=_cql_losses, make_policy=lambda a: CQLPolicy(a), tag=method_id(config))
 
@@ -962,7 +819,6 @@ def _train_cem_model(config: dict, output_dir, *, model_family: str):
         model_family,
         obs_dim=train_dataset.obs_dim,
         num_actions=train_dataset.num_actions,
-        obs_backend=args.obs_backend,
         hidden_dim=args.hidden_dim,
         action_embed_dim=args.action_embed_dim,
         latent_dim=getattr(args, "latent_dim", None),
@@ -978,7 +834,7 @@ def _train_cem_model(config: dict, output_dir, *, model_family: str):
     for progress, batch, schedule in _training_batches(args, train_dataset, device, method_id(config)):
         last_schedule = schedule
         last_progress = progress
-        loss, info = _cem_batch_loss(model, batch, args, model_family=model_family, obs_backend=args.obs_backend)
+        loss, info = _cem_batch_loss(model, batch, args, model_family=model_family)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -1003,7 +859,6 @@ def _train_cem_model(config: dict, output_dir, *, model_family: str):
                     val_batch,
                     args,
                     model_family=model_family,
-                    obs_backend=args.obs_backend,
                 ),
                 progress=progress,
                 train_loss=float(loss.item()),
@@ -1013,7 +868,6 @@ def _train_cem_model(config: dict, output_dir, *, model_family: str):
                 val_dataset,
                 args,
                 model_family=model_family,
-                obs_backend=args.obs_backend,
             )
             train_history.append(
                 {
@@ -1306,7 +1160,6 @@ OFFLINE_TRAINERS = {
     "latent_model": train_latent_model,
     "reconstructive_model": train_reconstructive_model,
     "dqn": train_dqn,
-    "ppo": train_ppo,
     "bc": train_bc,
     "iql": train_iql,
     "cql": train_cql,

@@ -1,21 +1,14 @@
-"""Shared CEM-based trainers for raw_model, latent_model, and reconstructive_model."""
+"""Shared CEM world-model losses, rollout diagnostics, and policies."""
 
 from __future__ import annotations
-
-import copy
-from types import SimpleNamespace
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 
-from src.algorithms.common import TrainLogger, make_writer, random_admissible_action, recent_window_mean
 from src.envs.factory import make_env
 from src.models.cem_world_models import RawDynamicsModel, ReconstructiveLatentModel, LatentDynamicsModel
 from src.planners.cem import CategoricalCEMPlanner
-from src.utils.replay import ReplayBuffer
-from src.utils.seeding import set_seed
 from src.utils.torch_utils import as_device_string, get_torch_device
 
 
@@ -29,22 +22,14 @@ def _validate_model_family(model_family: str) -> str:
     return model_family
 
 
-def _is_discrete_backend(obs_backend: str) -> bool:
-    if obs_backend not in {"discrete_id", "state_vector"}:
-        raise ValueError(f"Unsupported obs_backend={obs_backend!r}")
-    return obs_backend == "discrete_id"
-
-
-def build_model(model_family: str, *, obs_dim: int, num_actions: int, obs_backend: str, hidden_dim: int, action_embed_dim: int, latent_dim: int | None = None):
+def build_model(model_family: str, *, obs_dim: int, num_actions: int, hidden_dim: int, action_embed_dim: int, latent_dim: int | None = None):
     model_family = _validate_model_family(model_family)
-    discrete_obs = _is_discrete_backend(obs_backend)
     if model_family == "raw_model":
         return RawDynamicsModel(
             obs_dim=obs_dim,
             num_actions=num_actions,
             hidden_dim=hidden_dim,
             action_embed_dim=action_embed_dim,
-            discrete_obs=discrete_obs,
         )
     if latent_dim is None:
         raise ValueError(f"model_family={model_family!r} requires latent_dim")
@@ -132,26 +117,19 @@ def _latent_model_target_latent(model: LatentDynamicsModel, next_obs: torch.Tens
 
 
 @torch.no_grad()
-def _state_error_vector(prediction: torch.Tensor, target_obs: torch.Tensor, target_state_id: torch.Tensor, *, discrete: bool) -> torch.Tensor:
-    if discrete:
-        return (prediction.argmax(dim=-1) != target_state_id).float()
+def _state_error_vector(prediction: torch.Tensor, target_obs: torch.Tensor) -> torch.Tensor:
     return (prediction - target_obs).pow(2).mean(dim=-1)
 
 
-def batch_loss(model, batch, args, *, model_family: str, obs_backend: str):
+def batch_loss(model, batch, args, *, model_family: str):
     model_family = _validate_model_family(model_family)
-    discrete_obs = _is_discrete_backend(obs_backend)
     reward_loss_weight = float(getattr(args, "reward_loss_weight", 1.0))
     continue_loss_weight = float(getattr(args, "continue_loss_weight", 1.0))
 
     if model_family == "raw_model":
         rollout = model.predict_from_obs(batch.obs, batch.action)
-        if discrete_obs:
-            dynamics_loss = F.cross_entropy(rollout["prediction"], batch.next_state_id)
-            prediction_error = (rollout["prediction"].argmax(dim=-1) != batch.next_state_id).float().mean()
-        else:
-            dynamics_loss = F.mse_loss(rollout["prediction"], batch.next_obs)
-            prediction_error = F.mse_loss(rollout["prediction"], batch.next_obs)
+        dynamics_loss = F.mse_loss(rollout["prediction"], batch.next_obs)
+        prediction_error = dynamics_loss
         total = float(getattr(args, "dynamics_loss_weight", 1.0)) * dynamics_loss
         info = {
             "dynamics_loss": float(dynamics_loss.item()),
@@ -171,12 +149,8 @@ def batch_loss(model, batch, args, *, model_family: str, obs_backend: str):
         rollout = model.predict_from_obs(batch.obs, batch.action)
         target_latent = model.encode(batch.next_obs)
         latent_loss = F.mse_loss(rollout["prediction"], target_latent)
-        if discrete_obs:
-            reconstruction_loss = F.cross_entropy(rollout["reconstruction"], batch.next_state_id)
-            prediction_error = (rollout["reconstruction"].argmax(dim=-1) != batch.next_state_id).float().mean()
-        else:
-            reconstruction_loss = F.mse_loss(rollout["reconstruction"], batch.next_obs)
-            prediction_error = F.mse_loss(rollout["reconstruction"], batch.next_obs)
+        reconstruction_loss = F.mse_loss(rollout["reconstruction"], batch.next_obs)
+        prediction_error = reconstruction_loss
         total = float(getattr(args, "latent_loss_weight", 1.0)) * latent_loss
         total = total + float(getattr(args, "reconstruction_loss_weight", 1.0)) * reconstruction_loss
         info = {
@@ -194,9 +168,8 @@ def batch_loss(model, batch, args, *, model_family: str, obs_backend: str):
 
 
 @torch.no_grad()
-def rollout_validation_metrics(model, dataset, args, *, model_family: str, obs_backend: str) -> dict[str, float]:
+def rollout_validation_metrics(model, dataset, args, *, model_family: str) -> dict[str, float]:
     model_family = _validate_model_family(model_family)
-    discrete_obs = _is_discrete_backend(obs_backend)
     horizon = int(getattr(args, "cem_horizon", 1))
     rollout_steps = sorted({1, 3, 5, min(horizon, 10)})
     batch_size = int(getattr(args, "offline_batch_size", 256))
@@ -228,7 +201,6 @@ def rollout_validation_metrics(model, dataset, args, *, model_family: str, obs_b
                 action = batch.actions[:, step_idx]
                 rollout = model.rollout_step(state, action)
                 target_next_obs = batch.next_obs[:, step_idx, :]
-                target_next_state_id = batch.next_state_id[:, step_idx]
                 target_reward = batch.rewards[:, step_idx]
                 target_done = batch.dones[:, step_idx]
 
@@ -236,19 +208,9 @@ def rollout_validation_metrics(model, dataset, args, *, model_family: str, obs_b
                     target_latent = _latent_model_target_latent(model, target_next_obs, args)
                     state_error = (rollout["prediction"] - target_latent).pow(2).mean(dim=-1)
                 elif model_family == "reconstructive_model":
-                    state_error = _state_error_vector(
-                        rollout["reconstruction"],
-                        target_next_obs,
-                        target_next_state_id,
-                        discrete=discrete_obs,
-                    )
+                    state_error = _state_error_vector(rollout["reconstruction"], target_next_obs)
                 else:
-                    state_error = _state_error_vector(
-                        rollout["prediction"],
-                        target_next_obs,
-                        target_next_state_id,
-                        discrete=discrete_obs,
-                    )
+                    state_error = _state_error_vector(rollout["prediction"], target_next_obs)
 
                 reward_error = (rollout["reward"] - target_reward).pow(2)
                 continue_loss = F.binary_cross_entropy_with_logits(
@@ -285,7 +247,7 @@ def rollout_validation_metrics(model, dataset, args, *, model_family: str, obs_b
 
 
 def make_policy(model, config: dict) -> CEMWorldModelPolicy:
-    env = make_env(config, obs_backend=config["obs_backend"])
+    env = make_env(config)
     planner = CategoricalCEMPlanner(
         horizon=config["cem_horizon"],
         num_actions=env.num_actions,
@@ -299,146 +261,12 @@ def make_policy(model, config: dict) -> CEMWorldModelPolicy:
     return CEMWorldModelPolicy(model, planner, gamma=config.get("gamma", 1.0))
 
 
-def train(config: dict, output_dir, *, model_family: str):
-    args = SimpleNamespace(**config)
-    model_family = _validate_model_family(model_family)
-    if not hasattr(args, "gamma"):
-        args.gamma = 1.0
-    latent_model_target_decay = _latent_model_target_encoder_decay(args) if model_family == "latent_model" else None
-    set_seed(args.seed)
-    device = get_torch_device()
-    env = make_env(config, obs_backend=args.obs_backend, seed=args.seed)
-    model = build_model(
-        model_family,
-        obs_dim=env.obs_dim,
-        num_actions=env.num_actions,
-        obs_backend=args.obs_backend,
-        hidden_dim=args.hidden_dim,
-        action_embed_dim=args.action_embed_dim,
-        latent_dim=getattr(args, "latent_dim", None),
-    ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    replay = ReplayBuffer(args.replay_size)
-    planner = CategoricalCEMPlanner(
-        horizon=args.cem_horizon,
-        num_actions=env.num_actions,
-        samples=args.cem_samples,
-        elites=args.cem_elites,
-        iterations=args.cem_iterations,
-        alpha=args.cem_alpha,
-        device=as_device_string(device),
-    )
-    writer = make_writer(bool(args.use_tensorboard), output_dir / "tensorboard")
-    logger = TrainLogger(
-        gamma=args.gamma,
-        success_threshold=args.success_threshold,
-        writer=writer,
-        algo_name=args.algo,
-        max_episodes=args.max_episodes,
-        show_progress=bool(getattr(args, "show_progress", True)),
-    )
-
-    obs, info = env.reset(seed=args.seed)
-    episode_actions: list[int] = []
-    episode_metric_series = [env.transition_metrics(info)]
-    episode_return = 0.0
-    episode_length = 0
-    episode_number = 0
-    global_step = 0
-    best_score = float("-inf")
-    best_state = copy.deepcopy(model.state_dict())
-
-    while episode_number < args.max_episodes:
-        if global_step < args.warmup_steps or len(replay) < args.batch_size:
-            action = random_admissible_action(info)
-            planner_stats = {"best_score": 0.0}
-        else:
-            policy = CEMWorldModelPolicy(model, planner, args.gamma)
-            action = policy.act(obs, info, deterministic=True)
-            planner_stats = policy.last_plan_stats
-
-        next_obs, reward, terminated, truncated, next_info = env.step(action)
-        done = terminated or truncated
-        replay.push(
-            obs=obs,
-            action=action,
-            reward=reward,
-            next_obs=next_obs,
-            done=done,
-            action_mask=info["action_mask"],
-            next_action_mask=next_info["action_mask"],
-            state_id=info["state_id"],
-            next_state_id=next_info["state_id"],
-        )
-        episode_actions.append(action)
-        episode_metric_series.append(env.transition_metrics(next_info))
-        episode_return += reward
-        episode_length += 1
-        global_step += 1
-        logger.log_extra("planner_score", planner_stats["best_score"], global_step)
-
-        if len(replay) >= args.batch_size:
-            for _ in range(args.updates_per_step):
-                batch = replay.sample(args.batch_size, device=device)
-                loss, loss_info = batch_loss(model, batch, args, model_family=model_family, obs_backend=args.obs_backend)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                if model_family == "latent_model":
-                    model.update_target_encoder(latent_model_target_decay)
-                for key, value in loss_info.items():
-                    logger.log_extra(key, value, global_step)
-
-        obs = next_obs
-        info = next_info
-
-        if done:
-            outcome = env.episode_metrics(
-                total_reward=episode_return,
-                final_info=info,
-                transition_metrics=episode_metric_series,
-            )
-            logger.log_episode(
-                episode_number + 1,
-                episode_return,
-                episode_length,
-                global_step,
-                episode_actions,
-                success=bool(outcome["success"]),
-                action_distance=env.action_distance,
-                action_is_abrupt=env.action_is_abrupt,
-                transition_metrics=episode_metric_series,
-                outcome=outcome,
-            )
-            score = recent_window_mean(logger.returns)
-            if score >= best_score:
-                best_score = score
-                best_state = copy.deepcopy(model.state_dict())
-            episode_number += 1
-            obs, info = env.reset(seed=args.seed + episode_number)
-            episode_actions = []
-            episode_metric_series = [env.transition_metrics(info)]
-            episode_return = 0.0
-            episode_length = 0
-
-    env.close()
-    logger.close()
-    if writer is not None:
-        writer.close()
-    return {
-        "metrics": logger.metrics_payload(),
-        "checkpoint_last": {"model_state_dict": model.state_dict()},
-        "checkpoint_best": {"model_state_dict": best_state},
-    }
-
-
 def load_policy(config: dict, checkpoint: dict, *, model_family: str):
-    env = make_env(config, obs_backend=config["obs_backend"])
+    env = make_env(config)
     model = build_model(
         model_family,
         obs_dim=env.obs_dim,
         num_actions=env.num_actions,
-        obs_backend=config["obs_backend"],
         hidden_dim=config["hidden_dim"],
         action_embed_dim=config["action_embed_dim"],
         latent_dim=config.get("latent_dim"),

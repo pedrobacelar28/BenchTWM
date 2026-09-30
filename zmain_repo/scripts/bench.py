@@ -123,33 +123,24 @@ def _offline_preflight(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _estimate(params: dict[str, Any]) -> dict[str, Any]:
-    if params.get("train_mode") == "offline":
-        steps = int(params.get("offline_train_steps", 0))
-        batch = int(params.get("offline_batch_size", 0))
-        sequence_length = int(params.get("dreamer_batch_length", 1)) if params.get("algo") == "dreamer" else 1
-        return {
-            "optimization_steps": steps,
-            "batch_size": batch,
-            **({"sequence_length": sequence_length} if params.get("algo") == "dreamer" else {}),
-            "sampled_transitions_estimate": steps * batch * sequence_length,
-            "offline_eval_interval": int(params.get("offline_eval_interval", 0)),
-            "final_eval_episodes": int(params.get("eval_episodes", 0)),
-        }
+    steps = int(params.get("offline_train_steps", 0))
+    batch = int(params.get("offline_batch_size", 0))
+    sequence_length = int(params.get("dreamer_batch_length", 1)) if params.get("algo") == "dreamer" else 1
     return {
-        "episodes": int(params.get("max_episodes", 0)),
+        "optimization_steps": steps,
+        "batch_size": batch,
+        **({"sequence_length": sequence_length} if params.get("algo") == "dreamer" else {}),
+        "sampled_transitions_estimate": steps * batch * sequence_length,
         "final_eval_episodes": int(params.get("eval_episodes", 0)),
     }
 
 
 def _early_stopping_plan(params: dict[str, Any]) -> dict[str, Any]:
-    if params.get("train_mode") != "offline":
-        return {"enabled": False, "reason": "Online recipes use their own algorithm-specific checkpoint selection."}
     descriptions = {
         "bc": "validation behavior-cloning cross-entropy",
         "dqn": "validation TD loss",
         "iql": "validation IQL critic/value/actor objective",
         "cql": "validation conservative Q objective",
-        "ppo": "validation logged-PPO objective",
         "raw_model": "validation weighted world-model objective",
         "latent_model": "validation weighted latent-dynamics objective",
         "reconstructive_model": "validation weighted reconstruction-and-dynamics objective",
@@ -327,13 +318,12 @@ def _prepare_run(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, An
     params, dataset, recipe = catalog.run_config(
         args.dataset_id,
         args.method_id,
-        mode=args.mode,
         artifact_root=_root(args),
         seed=args.seed,
         overrides=overrides,
     )
     params["show_progress"] = not args.no_progress
-    preflight = _offline_preflight(params) if args.mode == "offline" else {"ready": True, "missing": {}, "paths": {}}
+    preflight = _offline_preflight(params)
     output_dir = run_directory(params, dataset_id=dataset.identifier, method_id=recipe.method_id, root=_root(args))
     manifest = initial_manifest(params, dataset_id=dataset.identifier, method_id=recipe.method_id, run_dir=output_dir, device=args.device)
     return params, preflight, output_dir, manifest
@@ -410,7 +400,7 @@ def _parse_seeds(raw: str) -> list[int]:
 def _cmd_suite(args: argparse.Namespace) -> int:
     catalog = _catalog(args)
     console = _console(args)
-    methods = args.methods or [item.method_id for item in catalog.compatible_methods(args.dataset_id, mode=args.mode)]
+    methods = args.methods or [item.method_id for item in catalog.compatible_methods(args.dataset_id)]
     seeds = _parse_seeds(args.seeds)
     jobs: list[QueueJob] = []
     plans = []
@@ -422,7 +412,7 @@ def _cmd_suite(args: argparse.Namespace) -> int:
             params, preflight, output_dir, manifest = _prepare_run(copied)
             plans.append({"method": method_id, "seed": seed, "output_dir": str(output_dir), "preflight": preflight, "estimate": _estimate(params)})
             jobs.append(QueueJob(name=f"{method_id}-seed-{seed}", params=params, output_dir=str(output_dir), manifest=manifest, device=args.device, force=args.force))
-    payload = {"dataset_id": args.dataset_id, "mode": args.mode, "jobs": plans}
+    payload = {"dataset_id": args.dataset_id, "jobs": plans}
     if args.dry_run or not args.execute:
         if args.json:
             console.emit(payload)
@@ -627,8 +617,6 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         policies = args.policies
     elif dataset.env_id == "epicare":
         policies = ["smart", "soc", "random", "oracle"]
-    elif dataset.env_id in {"dtr-ahn-chemo", "dtr-ghaffari-cancer"}:
-        policies = ["random"]
     else:
         # ICU reference policies are evaluated directly in the simulator.
         policies = ["expert", "epsilon_expert", "optimal", "random_admissible"]
@@ -640,10 +628,6 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         finally:
             env.close()
         evaluation_config = {**config, "algo": "baseline", "method_id": name}
-        if dataset.env_id in {"dtr-ahn-chemo", "dtr-ghaffari-cancer"} and name == "random":
-            # ``random`` is a stochastic reference, unlike a learned policy
-            # checkpoint evaluated greedily by default.
-            evaluation_config["eval_deterministic"] = False
         result = evaluate_policy(
             policy,
             config=evaluation_config,
@@ -706,7 +690,6 @@ def _cmd_research_matrix(args: argparse.Namespace) -> int:
         definition_path = PROJECT_ROOT / definition_path
     definition = load_json(definition_path)
     copied = argparse.Namespace(**vars(args))
-    copied.mode = str(definition.get("mode", "offline"))
     if "jobs" in definition:
         jobs = []
         for item in definition["jobs"]:
@@ -750,8 +733,6 @@ def _cmd_research_matrix(args: argparse.Namespace) -> int:
 def _tuning_space(trial, algo: str) -> dict[str, Any]:
     if algo == "dqn":
         return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "tau": trial.suggest_float("tau", 1e-4, 0.1, log=True)}
-    if algo == "ppo":
-        return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "offline_bc_weight": trial.suggest_float("offline_bc_weight", 0.0, 1.0)}
     if algo == "dreamer":
         return {
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 2e-4, log=True),
@@ -951,17 +932,15 @@ def _parse_args() -> argparse.Namespace:
     dataset_build.add_argument("--no-progress", action="store_true")
     dataset_build.set_defaults(handler=_cmd_dataset_build)
 
-    train = subparsers.add_parser("train", help="Train one named recipe; offline is the default.")
+    train = subparsers.add_parser("train", help="Train one named offline recipe.")
     train.add_argument("dataset_id")
     train.add_argument("method_id")
-    train.add_argument("--mode", choices=["offline", "online"], default="offline")
     _add_common(train, run=True)
     train.set_defaults(handler=_cmd_train)
 
     suite = subparsers.add_parser("suite", help="Plan or execute a local queue over named methods and seeds.")
     suite.add_argument("dataset_id")
     suite.add_argument("--method", dest="methods", action="append", help="Limit to a compatible method; repeatable.")
-    suite.add_argument("--mode", choices=["offline", "online"], default="offline")
     suite.add_argument("--seeds", default="0")
     suite.add_argument("--execute", action="store_true")
     suite.add_argument("--jobs", type=int, default=1)
@@ -1013,7 +992,6 @@ def _parse_args() -> argparse.Namespace:
     sweep = research_sub.add_parser("sweep", help="Run a method across explicit seeds.")
     sweep.add_argument("dataset_id")
     sweep.add_argument("method_id")
-    sweep.add_argument("--mode", choices=["offline", "online"], default="offline")
     sweep.add_argument("--seeds", default="0,1,2")
     sweep.add_argument("--execute", action="store_true")
     sweep.add_argument("--jobs", type=int, default=1)
@@ -1027,13 +1005,11 @@ def _parse_args() -> argparse.Namespace:
     matrix.add_argument("--jobs", type=int, default=1)
     matrix.add_argument("--gpus")
     matrix.add_argument("--follow", action="store_true", help="Show live job and optimization progress while the matrix runs.")
-    matrix.add_argument("--mode", choices=["offline", "online"], default="offline")
     _add_common(matrix, run=True)
     matrix.set_defaults(handler=_cmd_research_matrix)
     tune = research_sub.add_parser("tune", help="Run Optuna on one named offline recipe.")
     tune.add_argument("dataset_id")
     tune.add_argument("method_id")
-    tune.add_argument("--mode", choices=["offline"], default="offline")
     tune.add_argument("--trials", type=int, default=20)
     _add_common(tune, run=True)
     tune.set_defaults(handler=_cmd_research_tune)

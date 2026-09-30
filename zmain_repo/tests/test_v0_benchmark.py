@@ -86,7 +86,6 @@ class TestV0Benchmark(unittest.TestCase):
         params, _, recipe = catalog.run_config(
             "icu-sepsis/expert/dev",
             "bc",
-            mode="offline",
             artifact_root="/tmp/benchtwm-v0-test",
             seed=2,
         )
@@ -96,16 +95,6 @@ class TestV0Benchmark(unittest.TestCase):
         self.assertEqual(params["task_id"], "icu-sepsis/expert/dev|obs=state_vector|action=discrete|mode=offline")
         self.assertEqual(recipe.track, "direct_rl")
         self.assertNotIn("ppo", [item.method_id for item in catalog.compatible_methods("icu-sepsis/expert/dev")])
-
-    def test_discrete_id_compatibility_is_preserved(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dataset_dir = Path(tmp) / "dataset"
-            generate_dataset(_tiny_icu_dataset(dataset_dir))
-            from src.offline.dataset import OfflineTransitionDataset
-
-            dataset = OfflineTransitionDataset(dataset_dir / "train.npz", obs_backend="discrete_id")
-            self.assertEqual(dataset.obs_backend, "discrete_id")
-            self.assertEqual(dataset.obs_dim, dataset.num_states)
 
 
 if __name__ == "__main__":

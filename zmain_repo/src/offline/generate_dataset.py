@@ -1,4 +1,4 @@
-"""Generate local offline ICU-Sepsis datasets from simulator rollouts."""
+"""Generate offline datasets from simulator rollouts with exact behavior propensities."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ import pandas as pd
 from src.utils.progress import trange
 
 from src.algorithms.registry import get_policy_loader
-from src.bootstrap import bootstrap_icu_helpers
-from src.envs.factory import environment_id, make_env
+from src.envs.factory import make_env
 from src.utils.io import ensure_dir, load_json, save_json
 from src.utils.json_handling import get_param_iterable
 from src.utils.metrics import action_stability
@@ -61,10 +60,24 @@ def _sample_from_probs(rng: np.random.Generator, probs: np.ndarray) -> tuple[int
     return action, float(math.log(max(probs[action], 1e-12)))
 
 
-def _build_optimal_policy(env, config: dict) -> np.ndarray:
-    bootstrap_icu_helpers()
-    from icu_sepsis_helpers.utils.mdp import value_iteration
+def value_iteration(tx_mat: np.ndarray, r_mat: np.ndarray, gamma: float, *, max_steps: int = 50_000, delta: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
+    """Tabular value iteration, identical to the upstream ICU-Sepsis helper.
 
+    As upstream, the greedy policy is read from the last Bellman backup that
+    was computed before the stopping test succeeded.
+    """
+
+    value = np.zeros((1, 1, tx_mat.shape[0]))
+    for _ in range(int(max_steps)):
+        backup = np.multiply(tx_mat, r_mat + gamma * value)
+        new_value = np.max(np.sum(backup, axis=2), axis=1)
+        if np.max(np.abs(new_value - value)) < delta:
+            break
+        value = new_value
+    return np.argmax(np.sum(backup, axis=2), axis=1), value
+
+
+def _build_optimal_policy(env, config: dict) -> np.ndarray:
     dynamics = env.env.unwrapped.dynamics
     pi_star, _ = value_iteration(
         dynamics["tx_mat"],
@@ -184,41 +197,9 @@ class EpiCareBehaviorPolicy:
             self.current_policy.update(int(action), float(reward))
 
 
-class DTRRandomBehaviorPolicy:
-    """Uniform policy over the public DTR action grid with exact propensities."""
-
-    def __init__(self, config: dict, env):
-        self.config = config
-        self.rng = np.random.default_rng(int(config["seed"]))
-        self.num_actions = int(env.num_actions)
-        if str(config["behavior_policy"]) != "random":
-            raise ValueError("DTR datasets currently support behavior_policy='random' only")
-
-    def choose_episode_policy(self) -> str:
-        return "random"
-
-    def start_episode(self, episode_policy: str) -> None:
-        if episode_policy != "random":
-            raise ValueError(f"Unsupported DTR episode policy {episode_policy!r}")
-
-    def action(self, episode_policy: str, obs, info: dict) -> tuple[int, float, int]:
-        del obs
-        if episode_policy != "random":
-            raise ValueError(f"Unsupported DTR episode policy {episode_policy!r}")
-        admissible = list(info["admissible_actions"])
-        probs = _uniform_admissible_probs(self.num_actions, admissible)
-        action, logprob = _sample_from_probs(self.rng, probs)
-        return action, logprob, POLICY_IDS["random"]
-
-    def observe(self, action: int, reward: float) -> None:
-        del action, reward
-
-
 def _make_behavior(config: dict, env):
     if env.spec.env_id == "epicare":
         return EpiCareBehaviorPolicy(config, env)
-    if str(env.spec.env_id).startswith("dtr-"):
-        return DTRRandomBehaviorPolicy(config, env)
     return BehaviorPolicy(config, env)
 
 
@@ -418,16 +399,7 @@ def generate_dataset(config: dict) -> dict:
             print(f"Dataset already exists: {output_dir}")
         return load_json(metadata_path)
 
-    env_id = environment_id(config)
-    # Canonical catalog recipes set state_vector explicitly.  Keep the legacy
-    # ICU default discrete_id for callers that construct a minimal config and
-    # rely on the compatibility schema.
-    obs_backend = str(
-        config.get(
-            "obs_backend",
-            "state_vector" if env_id in {"epicare", "dtr-ahn-chemo", "dtr-ghaffari-cancer"} else "discrete_id",
-        )
-    )
+    obs_backend = "state_vector"
     env = make_env(config, obs_backend=obs_backend, seed=int(config["seed"]))
     behavior = _make_behavior(config, env)
     train_buffers, train_summaries = _collect_split(
@@ -482,7 +454,7 @@ def generate_dataset(config: dict) -> dict:
             "dim": int(env.spec.obs_dim),
             "state_vector_dim": int(env.spec.state_vector_dim),
             "feature_names": list(env.spec.feature_names),
-            "source": "environment.state_vector" if obs_backend == "state_vector" else "environment.state_id_one_hot",
+            "source": "environment.state_vector",
             **({"transform": dict(getattr(env, "observation_transform", {}))} if hasattr(env, "observation_transform") else {}),
         },
         "action": {

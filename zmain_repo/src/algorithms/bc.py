@@ -40,17 +40,9 @@ def load_policy(config: dict, checkpoint: dict):
     actor = build_actor_critic(
         config,
         obs_dim=env.obs_dim,
-        num_states=env.spec.num_states,
         num_actions=env.num_actions,
-        obs_backend=config["obs_backend"],
     ).to(get_torch_device())
-    # BC checkpoints contain only the actor logits.  Loading a full
-    # actor-critic state is also accepted for compatibility with old runs.
-    state = checkpoint["model_state_dict"]
-    if any(key.startswith("actor.") for key in state):
-        actor.load_state_dict(state)
-    else:
-        actor.actor.load_state_dict(state)
+    actor.load_state_dict(checkpoint["model_state_dict"])
     actor.eval()
     env.close()
     return BCPolicy(actor, temperature=float(config.get("policy_temperature", 1.0)))

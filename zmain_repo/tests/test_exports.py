@@ -9,7 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.algorithms.dqn import load_policy
 from src.evaluation import evaluate_policy
-from src.models.mlp import TabularQNetwork
+from src.models.mlp import build_q_network
 
 
 class TestExports(unittest.TestCase):
@@ -17,10 +17,13 @@ class TestExports(unittest.TestCase):
         config = {
             "algo": "dqn",
             "seed": 0,
-            "obs_backend": "discrete_id",
+            "obs_backend": "state_vector",
             "gamma": 1.0,
+            "policy_hidden_dim": 16,
+            "policy_hidden_layers": 1,
         }
-        network = TabularQNetwork(716, 25)
+        torch.manual_seed(0)
+        network = build_q_network(config, obs_dim=47, num_actions=25)
         checkpoint = {"model_state_dict": network.state_dict()}
         policy = load_policy(config, checkpoint)
         with tempfile.TemporaryDirectory() as tmpdir:

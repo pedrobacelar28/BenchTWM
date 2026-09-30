@@ -33,24 +33,6 @@ def _continuous_batch():
         action=actions,
         reward=rewards,
         done=done,
-        next_state_id=torch.zeros(obs.shape[0], dtype=torch.int64),
-    )
-
-
-def _discrete_batch():
-    obs = torch.eye(6, dtype=torch.float32)[:4]
-    next_state_id = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
-    next_obs = torch.eye(6, dtype=torch.float32)[next_state_id]
-    actions = torch.tensor([0, 1, 2, 0], dtype=torch.int64)
-    rewards = torch.tensor([0.0, 1.0, 0.0, 1.0], dtype=torch.float32)
-    done = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
-    return SimpleNamespace(
-        obs=obs,
-        next_obs=next_obs,
-        action=actions,
-        reward=rewards,
-        done=done,
-        next_state_id=next_state_id,
     )
 
 
@@ -60,7 +42,6 @@ class TestCEMWorldModels(unittest.TestCase):
             "raw_model",
             obs_dim=6,
             num_actions=3,
-            obs_backend="state_vector",
             hidden_dim=16,
             action_embed_dim=4,
         )
@@ -73,7 +54,6 @@ class TestCEMWorldModels(unittest.TestCase):
                     model_family,
                     obs_dim=6,
                     num_actions=3,
-                    obs_backend="state_vector",
                     hidden_dim=16,
                     action_embed_dim=4,
                     latent_dim=8,
@@ -81,56 +61,11 @@ class TestCEMWorldModels(unittest.TestCase):
                 self.assertEqual(model.reward_head[0].in_features, 12)
                 self.assertEqual(model.continue_head[0].in_features, 12)
 
-    def test_raw_model_discrete_loss_decreases(self):
-        model = build_model(
-            "raw_model",
-            obs_dim=6,
-            num_actions=3,
-            obs_backend="discrete_id",
-            hidden_dim=16,
-            action_embed_dim=4,
-        )
-        batch = _discrete_batch()
-        args = SimpleNamespace(
-            dynamics_loss_weight=1.0,
-            reward_loss_weight=1.0,
-            continue_loss_weight=1.0,
-        )
-        optimizer = optim.Adam(model.parameters(), lr=1e-2)
-        losses = []
-        for _ in range(25):
-            loss, _ = batch_loss(model, batch, args, model_family="raw_model", obs_backend="discrete_id")
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            losses.append(float(loss.item()))
-        self.assertLess(losses[-1], losses[0])
-
-    def test_raw_model_discrete_rollout_uses_softmax_distribution(self):
-        model = build_model(
-            "raw_model",
-            obs_dim=5,
-            num_actions=2,
-            obs_backend="discrete_id",
-            hidden_dim=8,
-            action_embed_dim=4,
-        )
-        for parameter in model.parameters():
-            torch.nn.init.constant_(parameter, 0.0)
-        model.predictor[-1].bias.data.copy_(torch.tensor([2.0, 1.0, 0.0, -1.0, -2.0]))
-        rollout = model.rollout_step(torch.eye(5)[:1], torch.tensor([0], dtype=torch.int64))
-        next_state = rollout["next_state"]
-        self.assertAlmostEqual(float(next_state.sum().item()), 1.0, places=5)
-        self.assertGreater(float(next_state[0, 0].item()), float(next_state[0, 1].item()))
-        self.assertGreater(float(next_state[0, 1].item()), float(next_state[0, 2].item()))
-        self.assertFalse(torch.allclose(next_state, torch.round(next_state)))
-
     def test_latent_model_ema_prediction_loss_decreases(self):
         model = build_model(
             "latent_model",
             obs_dim=6,
             num_actions=3,
-            obs_backend="state_vector",
             hidden_dim=16,
             action_embed_dim=4,
             latent_dim=8,
@@ -145,7 +80,7 @@ class TestCEMWorldModels(unittest.TestCase):
         optimizer = optim.Adam(model.parameters(), lr=1e-2)
         losses = []
         for _ in range(30):
-            loss, _ = batch_loss(model, batch, args, model_family="latent_model", obs_backend="state_vector")
+            loss, _ = batch_loss(model, batch, args, model_family="latent_model")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -158,7 +93,6 @@ class TestCEMWorldModels(unittest.TestCase):
             "latent_model",
             obs_dim=6,
             num_actions=3,
-            obs_backend="state_vector",
             hidden_dim=16,
             action_embed_dim=4,
             latent_dim=8,
@@ -170,14 +104,13 @@ class TestCEMWorldModels(unittest.TestCase):
             continue_loss_weight=1.0,
         )
         with self.assertRaisesRegex(ValueError, "target_encoder_decay"):
-            batch_loss(model, batch, args, model_family="latent_model", obs_backend="state_vector")
+            batch_loss(model, batch, args, model_family="latent_model")
 
     def test_latent_model_target_encoder_updates(self):
         model = build_model(
             "latent_model",
             obs_dim=6,
             num_actions=3,
-            obs_backend="state_vector",
             hidden_dim=16,
             action_embed_dim=4,
             latent_dim=8,
@@ -194,7 +127,6 @@ class TestCEMWorldModels(unittest.TestCase):
             "reconstructive_model",
             obs_dim=6,
             num_actions=3,
-            obs_backend="state_vector",
             hidden_dim=16,
             action_embed_dim=4,
             latent_dim=8,
@@ -209,7 +141,7 @@ class TestCEMWorldModels(unittest.TestCase):
         optimizer = optim.Adam(model.parameters(), lr=1e-2)
         losses = []
         for _ in range(30):
-            loss, _ = batch_loss(model, batch, args, model_family="reconstructive_model", obs_backend="state_vector")
+            loss, _ = batch_loss(model, batch, args, model_family="reconstructive_model")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -222,7 +154,6 @@ class TestCEMWorldModels(unittest.TestCase):
                 kwargs = {
                     "obs_dim": 6,
                     "num_actions": 3,
-                    "obs_backend": "state_vector",
                     "hidden_dim": 8,
                     "action_embed_dim": 4,
                 }

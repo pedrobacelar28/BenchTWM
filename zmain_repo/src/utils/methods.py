@@ -8,17 +8,15 @@ OFFLINE_METHOD_IDS = {
     "dqn": "dqn_offline",
     "iql": "iql_offline",
     "cql": "cql_offline",
-    "ppo": "ppo_logged_offline",
     "dreamer": "dreamer",
 }
 
 CEM_MODEL_ALGOS = {"raw_model", "latent_model", "reconstructive_model"}
 BACKEND_LABELS = {
-    "discrete_id": "discrete",
     "state_vector": "continuous",
 }
 
-TRACKS = {"direct_rl", "provisional_planning", "published_planning", "online_baseline"}
+TRACKS = {"direct_rl", "provisional_planning"}
 
 
 def action_type(config: dict) -> str:
@@ -51,23 +49,21 @@ def benchmark_track(config: dict) -> str:
     algo = str(config.get("algo", ""))
     if algo in CEM_MODEL_ALGOS or algo == "dreamer":
         return "provisional_planning"
-    if train_mode(config) == "offline" and algo in {"bc", "dqn", "iql", "cql"}:
-        return "direct_rl"
-    return "online_baseline"
+    return "direct_rl"
 
 
 def train_mode(config: dict) -> str:
-    return str(config.get("train_mode", "online")).lower()
+    mode = str(config.get("train_mode", "offline")).lower()
+    if mode != "offline":
+        raise ValueError(f"BenchTWM is offline-only; got train_mode={mode!r}")
+    return mode
 
 
 def _cem_method_id(config: dict) -> str:
     obs_backend = str(config.get("obs_backend", ""))
     if obs_backend not in BACKEND_LABELS:
         raise KeyError(f"CEM world-model algo requires obs_backend in {sorted(BACKEND_LABELS)}, got {obs_backend!r}")
-    base = f"{config['algo']}_{BACKEND_LABELS[obs_backend]}_cem"
-    if train_mode(config) == "offline":
-        return f"{base}_offline"
-    return base
+    return f"{config['algo']}_{BACKEND_LABELS[obs_backend]}_cem_offline"
 
 
 def method_id(config: dict) -> str:
@@ -76,8 +72,6 @@ def method_id(config: dict) -> str:
     algo = str(config["algo"])
     if algo in CEM_MODEL_ALGOS:
         return _cem_method_id(config)
-    if train_mode(config) == "offline":
-        if algo not in OFFLINE_METHOD_IDS:
-            raise KeyError(f"No offline method_id registered for algo={algo!r}")
-        return OFFLINE_METHOD_IDS[algo]
-    return algo
+    if algo not in OFFLINE_METHOD_IDS:
+        raise KeyError(f"No offline method_id registered for algo={algo!r}")
+    return OFFLINE_METHOD_IDS[algo]

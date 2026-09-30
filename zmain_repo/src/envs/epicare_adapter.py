@@ -13,10 +13,8 @@ from epicare import EpiCare  # noqa: E402
 
 
 class EpiCareEnvWrapper(EnvAdapter):
-    def __init__(self, *, obs_backend: str = "state_vector", seed: int | None = None, environment_seed: int = 1, **kwargs):
-        if obs_backend != "state_vector":
-            raise ValueError("EpiCare only supports obs_backend='state_vector'; its disease state is intentionally hidden")
-        self.obs_backend = obs_backend
+    def __init__(self, *, seed: int | None = None, environment_seed: int = 1, **kwargs):
+        self.obs_backend = "state_vector"
         self.environment_seed = int(environment_seed)
         self.env = EpiCare(seed=self.environment_seed, **kwargs)
         observation, _ = self.env.reset(seed=seed)
@@ -27,7 +25,7 @@ class EpiCareEnvWrapper(EnvAdapter):
             num_actions=num_actions,
             obs_dim=symptom_dim,
             state_vector_dim=symptom_dim,
-            obs_backend=obs_backend,
+            obs_backend="state_vector",
             num_states=int(self.env.n_diseases + 1),
             supported_obs_backends=("state_vector",),
             action_labels=tuple(f"Treatment {idx}" for idx in range(num_actions)),

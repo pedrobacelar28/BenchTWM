@@ -29,7 +29,7 @@ def normalize_experiment(experiment: dict) -> dict:
     return {
         key: _normalize_value(value)
         for key, value in sorted(experiment.items())
-        if key not in IGNORED_KEYS and not (key == "train_mode" and str(value).lower() == "online")
+        if key not in IGNORED_KEYS
     }
 
 

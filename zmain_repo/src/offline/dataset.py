@@ -66,12 +66,12 @@ def resolve_dataset_path(path: str | Path) -> Path:
 
 
 class OfflineTransitionDataset:
-    def __init__(self, path: str | Path, *, obs_backend: str = "discrete_id", seed: int | None = None):
+    def __init__(self, path: str | Path, *, obs_backend: str = "state_vector", seed: int | None = None):
         self.path = resolve_dataset_path(path)
         if not self.path.exists():
             raise FileNotFoundError(self.path)
-        if obs_backend not in {"discrete_id", "state_vector"}:
-            raise ValueError(f"Unsupported obs_backend={obs_backend!r}")
+        if obs_backend != "state_vector":
+            raise ValueError(f"Unsupported obs_backend={obs_backend!r}; only 'state_vector' is supported")
         self.obs_backend = obs_backend
         metadata_path = self.path.parent / "metadata.json"
         self.metadata = load_json(metadata_path) if metadata_path.exists() else {}
@@ -80,10 +80,6 @@ class OfflineTransitionDataset:
             if missing:
                 raise ValueError(f"Offline dataset {self.path} is missing required arrays: {missing}")
             self.data = {key: payload[key] for key in payload.files}
-        if obs_backend == "state_vector" and "state_vectors" not in self.data:
-            raise ValueError(f"Offline dataset {self.path} does not contain state_vectors for obs_backend='state_vector'")
-        if obs_backend == "state_vector" and "next_state_vectors" not in self.data:
-            raise ValueError(f"Offline dataset {self.path} does not contain next_state_vectors for obs_backend='state_vector'")
         self.size = int(len(self.data["actions"]))
         if self.size == 0:
             raise ValueError(f"Offline dataset {self.path} is empty")
@@ -122,13 +118,7 @@ class OfflineTransitionDataset:
     def num_actions(self) -> int:
         return int(self.data["action_masks"].shape[1])
 
-    @property
-    def num_states(self) -> int:
-        return int(self.data["observations"].shape[1])
-
     def _obs_array(self, which: str) -> np.ndarray:
-        if self.obs_backend == "state_vector":
-            return self.data["state_vectors" if which == "obs" else "next_state_vectors"]
         return self.data["observations" if which == "obs" else "next_observations"]
 
     def _batch_from_indices(self, idxs: np.ndarray, device: str | torch.device = "cpu") -> OfflineBatch:

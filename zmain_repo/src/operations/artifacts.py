@@ -43,7 +43,7 @@ def run_directory(
         / "runs"
         / environment_component
         / Path(*dataset_parts)
-        / _path_component(str(params.get("train_mode", "online")))
+        / _path_component(str(params.get("train_mode", "offline")))
         / _path_component(method_id)
         / f"seed-{seed}--{signature}"
     )
@@ -94,7 +94,7 @@ def initial_manifest(
         "recipe_id": params.get("recipe_id"),
         "config_signature": signature,
         "environment": params.get("env_id"),
-        "train_mode": params.get("train_mode", "online"),
+        "train_mode": params.get("train_mode", "offline"),
         "seed": int(params.get("seed", 0)),
         "provenance": _provenance(device),
     }

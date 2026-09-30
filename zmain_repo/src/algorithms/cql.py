@@ -43,9 +43,7 @@ def load_policy(config: dict, checkpoint: dict):
     agent = build_cql_agent(
         config,
         obs_dim=env.obs_dim,
-        num_states=env.spec.num_states,
         num_actions=env.num_actions,
-        obs_backend=config["obs_backend"],
     ).to(get_torch_device())
     agent.load_state_dict(checkpoint["model_state_dict"])
     agent.eval()

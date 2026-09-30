@@ -169,13 +169,13 @@ class Catalog:
             if not dataset.config_path.exists():
                 errors.append(f"dataset config missing: {dataset.config_path}")
         for recipe in self.recipes:
-            if recipe.mode not in {"offline", "online"}:
+            if recipe.mode != "offline":
                 errors.append(f"recipe {recipe.identifier} has unsupported mode {recipe.mode!r}")
             if recipe.env_id not in self.payload.get("environments", {}):
                 errors.append(f"recipe {recipe.identifier} references unknown environment {recipe.env_id}")
             if not recipe.config_path.exists():
                 errors.append(f"recipe config missing: {recipe.config_path}")
-            if recipe.track and recipe.track not in {"direct_rl", "provisional_planning", "published_planning", "online_baseline"}:
+            if recipe.track and recipe.track not in {"direct_rl", "provisional_planning"}:
                 errors.append(f"recipe {recipe.identifier} has unsupported track {recipe.track!r}")
         for dataset in self.datasets:
             if not any(recipe.env_id == dataset.env_id and recipe.tier == dataset.tier for recipe in self.recipes):
@@ -251,7 +251,7 @@ class Catalog:
         dataset_id: str,
         method_id: str,
         *,
-        mode: str,
+        mode: str = "offline",
         artifact_root: str | Path,
         seed: int | None = None,
         overrides: dict[str, Any] | None = None,

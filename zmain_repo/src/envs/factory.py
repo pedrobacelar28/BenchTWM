@@ -7,13 +7,8 @@ from typing import Any
 ENV_ALIASES = {
     "icu": "icu_sepsis",
     "icu_sepsis": "icu_sepsis",
+    "icu-sepsis": "icu_sepsis",
     "epicare": "epicare",
-    "dtr-ahn-chemo": "dtr-ahn-chemo",
-    "dtr_ahn_chemo": "dtr-ahn-chemo",
-    "ahn_chemo": "dtr-ahn-chemo",
-    "dtr-ghaffari-cancer": "dtr-ghaffari-cancer",
-    "dtr_ghaffari_cancer": "dtr-ghaffari-cancer",
-    "ghaffari_cancer": "dtr-ghaffari-cancer",
 }
 
 
@@ -34,34 +29,15 @@ def make_env(
 ):
     config = {} if config is None else config
     env_id = environment_id(config)
-    backend = str(obs_backend or config.get("obs_backend", "discrete_id"))
+    backend = str(obs_backend or config.get("obs_backend", "state_vector"))
+    if backend != "state_vector":
+        raise ValueError(f"Only obs_backend='state_vector' is supported, got {backend!r}")
     kwargs = dict(config.get("env_kwargs", {}))
     environment_seed = int(config.get("environment_seed", config.get("seed", 0)))
     if env_id == "icu_sepsis":
         from src.envs.icu_adapter import ICUSepsisEnvWrapper
 
-        return ICUSepsisEnvWrapper(
-            obs_backend=backend,
-            seed=seed,
-            params=params if params is not None else kwargs or None,
-        )
-    if env_id == "dtr-ahn-chemo":
-        from src.envs.dtr_adapter import DTRAhnChemoEnvWrapper
-
-        if backend != "state_vector":
-            raise ValueError("DTR AhnChemo only supports obs_backend='state_vector'")
-        return DTRAhnChemoEnvWrapper(seed=seed, **kwargs)
-    if env_id == "dtr-ghaffari-cancer":
-        from src.envs.dtr_adapter import DTRGhaffariCancerEnvWrapper
-
-        if backend != "state_vector":
-            raise ValueError("DTR GhaffariCancer only supports obs_backend='state_vector'")
-        return DTRGhaffariCancerEnvWrapper(seed=seed, **kwargs)
+        return ICUSepsisEnvWrapper(seed=seed, params=params if params is not None else kwargs or None)
     from src.envs.epicare_adapter import EpiCareEnvWrapper
 
-    return EpiCareEnvWrapper(
-        obs_backend=backend,
-        seed=seed,
-        environment_seed=environment_seed,
-        **kwargs,
-    )
+    return EpiCareEnvWrapper(seed=seed, environment_seed=environment_seed, **kwargs)
