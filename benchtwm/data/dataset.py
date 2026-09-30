@@ -66,13 +66,10 @@ def resolve_dataset_path(path: str | Path) -> Path:
 
 
 class OfflineTransitionDataset:
-    def __init__(self, path: str | Path, *, obs_backend: str = "state_vector", seed: int | None = None):
+    def __init__(self, path: str | Path, *, seed: int | None = None):
         self.path = resolve_dataset_path(path)
         if not self.path.exists():
             raise FileNotFoundError(self.path)
-        if obs_backend != "state_vector":
-            raise ValueError(f"Unsupported obs_backend={obs_backend!r}; only 'state_vector' is supported")
-        self.obs_backend = obs_backend
         metadata_path = self.path.parent / "metadata.json"
         self.metadata = load_json(metadata_path) if metadata_path.exists() else {}
         with np.load(self.path, allow_pickle=False) as payload:

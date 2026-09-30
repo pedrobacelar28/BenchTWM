@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from benchtwm.algorithms.registry import get_policy_loader
+from benchtwm.algorithms import get_algorithm
 from benchtwm.envs import get_environment, make_env
 from benchtwm.evaluation import evaluate_policy
 from benchtwm.data.collect import collect_dataset
@@ -37,6 +37,7 @@ from benchtwm.ope import evaluate_ope, export_ope
 from benchtwm.operations.artifacts import (
     artifact_root,
     discover_runs,
+    effective_status,
     initial_manifest,
     is_complete,
     load_manifest,
@@ -48,7 +49,7 @@ from benchtwm.operations.catalog import Catalog, CatalogError, dataset_artifact_
 from benchtwm.operations.console import BenchConsole
 from benchtwm.operations.queue import QueueJob, execute_queue
 from benchtwm.operations.reporting import build_run_report
-from benchtwm.run_experiment import run_experiment
+from benchtwm.runner import load_run, run_experiment
 from benchtwm.utils.io import ensure_dir, load_json, save_json
 
 
@@ -135,21 +136,11 @@ def _estimate(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _early_stopping_plan(params: dict[str, Any]) -> dict[str, Any]:
-    descriptions = {
-        "bc": "validation behavior-cloning cross-entropy",
-        "dqn": "validation TD loss",
-        "iql": "validation IQL critic/value/actor objective",
-        "cql": "validation conservative Q objective",
-        "raw_model": "validation weighted world-model objective",
-        "latent_model": "validation weighted latent-dynamics objective",
-        "reconstructive_model": "validation weighted reconstruction-and-dynamics objective",
-        "dreamer": "validation Dreamer world-model, actor, and value objective",
-    }
     patience = int(params.get("early_stopping_patience", 20))
     return {
         "enabled": patience > 0,
         "monitor": "validation_loss",
-        "meaning": descriptions.get(str(params.get("algo")), "algorithm validation objective"),
+        "meaning": get_algorithm(params["algo"]).validation_objective,
         "direction": "minimize",
         "patience_validation_checks": patience,
         "min_delta": float(params.get("early_stopping_min_delta", 0.0)),
@@ -190,12 +181,7 @@ def _device(requested: str) -> Iterator[None]:
 
 
 def _load_policy(run_dir: Path):
-    config = load_json(run_dir / "config.json")
-    checkpoint_path = run_dir / "checkpoint_best.pt"
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Missing best checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    return config, get_policy_loader(config["algo"])(config, checkpoint)
+    return load_run(run_dir)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -377,7 +363,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
             f"Dataset {args.dataset_id!r} is not ready. Run: python scripts/bench.py dataset build {args.dataset_id}"
         )
     with _device(args.device):
-        actual_output = run_experiment(params, force_run=args.force, output_dir=output_dir, manifest=manifest, quiet=True)
+        actual_output = run_experiment(params, output_dir=output_dir, manifest=manifest, force=args.force, quiet=True)
     if args.json:
         console.emit({**plan, "actual_output_dir": str(actual_output), "status": "completed"})
     else:
@@ -443,7 +429,7 @@ def _run_summary(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_dir": str(run_dir),
         "run_id": manifest.get("run_id"),
-        "status": manifest.get("status"),
+        "status": effective_status(manifest),
         "dataset_id": manifest.get("dataset_id"),
         "task_id": manifest.get("task_id"),
         "method_id": manifest.get("method_id"),
@@ -559,14 +545,12 @@ def _cmd_ope(args: argparse.Namespace) -> int:
     summary, bootstrap = evaluate_ope(
         policy,
         dataset_path=dataset_path,
-        obs_backend=config["obs_backend"],
         gamma=float(config.get("gamma", 1.0)),
         bootstrap_replicates=args.bootstrap,
         seed=int(config.get("seed", 0)),
         deterministic=deterministic,
         target_policy_mode=target_mode,
         show_progress=not args.no_progress,
-        progress_desc="OPE",
     )
     summary["task_id"] = str(config.get("task_id", ""))
     summary["track"] = str(config.get("track", ""))
@@ -722,17 +706,6 @@ def _cmd_research_matrix(args: argparse.Namespace) -> int:
     return 0 if not manifest["failures"] else 1
 
 
-def _tuning_space(trial, algo: str) -> dict[str, Any]:
-    if algo == "dqn":
-        return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True), "tau": trial.suggest_float("tau", 1e-4, 0.1, log=True)}
-    if algo == "dreamer":
-        return {
-            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 2e-4, log=True),
-            "dreamer_imag_length": trial.suggest_int("dreamer_imag_length", 5, 20),
-        }
-    return {"learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-3, log=True), "cem_horizon": trial.suggest_int("cem_horizon", 3, 12)}
-
-
 def _cmd_research_tune(args: argparse.Namespace) -> int:
     import optuna
 
@@ -747,12 +720,12 @@ def _cmd_research_tune(args: argparse.Namespace) -> int:
 
     def objective(trial):
         params = dict(base_params)
-        params.update(_tuning_space(trial, params["algo"]))
+        params.update(get_algorithm(params["algo"]).tuning_space(trial))
         params["tuning_trial"] = int(trial.number)
         output_dir = run_directory(params, dataset_id=args.dataset_id, method_id=args.method_id, root=_root(args))
         manifest = initial_manifest(params, dataset_id=args.dataset_id, method_id=args.method_id, run_dir=output_dir, device=args.device)
         with _device(args.device):
-            run_experiment(params, force_run=args.force, output_dir=output_dir, manifest=manifest, quiet=True)
+            run_experiment(params, output_dir=output_dir, manifest=manifest, force=args.force, quiet=True)
         summary = load_json(output_dir / "metrics_summary.json").get("train_summary", {})
         value = summary.get("best_validation_loss")
         if value is None:
@@ -782,10 +755,11 @@ def _cmd_research_collect(args: argparse.Namespace) -> int:
     rows = []
     for run_dir, manifest in discover_runs(_root(args)):
         row = _run_summary(run_dir, manifest)
-        summary_path = run_dir / "metrics_summary.csv"
+        summary_path = run_dir / "metrics_summary.json"
         if summary_path.exists():
-            with summary_path.open("r", encoding="utf-8") as handle:
-                row.update(next(csv.DictReader(handle), {}))
+            summary = load_json(summary_path)
+            for section in ("train_summary", "eval_summary", "ope_summary", "timing_summary"):
+                row.update({f"{section.split('_')[0]}_{key}": value for key, value in (summary.get(section) or {}).items()})
         rows.append(row)
     destination = ensure_dir(_root(args) / "reports") / "run_index.csv"
     fieldnames = sorted({key for row in rows for key in row})

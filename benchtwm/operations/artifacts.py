@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import platform
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -100,6 +102,9 @@ def initial_manifest(
     }
 
 
+FINAL_STATUSES = {"completed", "failed", "interrupted"}
+
+
 def write_manifest(run_dir: str | Path, manifest: dict[str, Any], *, status: str | None = None, error: str | None = None) -> dict[str, Any]:
     run_dir = ensure_dir(run_dir)
     current = dict(manifest)
@@ -108,10 +113,33 @@ def write_manifest(run_dir: str | Path, manifest: dict[str, Any], *, status: str
     if error is not None:
         current["error"] = error
     current["updated_at"] = datetime.now(timezone.utc).isoformat()
-    if status in {"completed", "failed"}:
+    if status == "running":
+        # Lets `status` tell a live run from one whose process died.
+        current["process"] = {"pid": os.getpid(), "host": socket.gethostname()}
+    if status in FINAL_STATUSES:
         current["finished_at"] = current["updated_at"]
     save_json(current, run_dir / "run_manifest.json")
     return current
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def effective_status(manifest: dict[str, Any]) -> str:
+    """Manifest status, reporting ``stale`` for a 'running' run whose process is gone."""
+
+    status = str(manifest.get("status", "unknown"))
+    process = manifest.get("process") or {}
+    if status == "running" and process.get("host") == socket.gethostname() and not _process_alive(int(process.get("pid", -1))):
+        return "stale"
+    return status
 
 
 def load_manifest(run_dir: str | Path) -> dict[str, Any]:
@@ -121,7 +149,7 @@ def load_manifest(run_dir: str | Path) -> dict[str, Any]:
 def is_complete(run_dir: str | Path) -> bool:
     path = Path(run_dir)
     manifest_path = path / "run_manifest.json"
-    if not manifest_path.exists() or not (path / "metrics.pkl").exists():
+    if not manifest_path.exists() or not (path / "eval_summary.json").exists():
         return False
     try:
         return load_manifest(path).get("status") == "completed"

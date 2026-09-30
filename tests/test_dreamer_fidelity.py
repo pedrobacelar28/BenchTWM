@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from benchtwm.models.dreamer import (
+from benchtwm.algorithms.dreamer.agent import (
     DreamerAgent,
     DreamerConfig,
     DreamerOptimizer,

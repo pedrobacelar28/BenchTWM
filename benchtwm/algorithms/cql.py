@@ -1,48 +1,56 @@
-"""Discrete Conservative Q-Learning policy loader."""
+"""Discrete Conservative Q-Learning (Kumar et al., 2020)."""
 
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-from benchtwm.envs import make_env
-from benchtwm.policies import Policy
-from benchtwm.models.offline_rl import build_cql_agent
-from benchtwm.utils.torch_utils import get_torch_device
+from benchtwm.algorithms import register_algorithm
+from benchtwm.algorithms.base import MODEL_FREE, OfflineAlgorithm
+from benchtwm.algorithms.networks import QNetwork, QPolicy, hidden_dims
 
 
-class CQLPolicy(Policy):
-    def __init__(self, agent, *, temperature: float = 1.0):
+class TwinQ(nn.Module):
+    def __init__(self, obs_dim: int, num_actions: int, hidden: list[int]):
         super().__init__()
-        self.agent = agent.eval()
-        self.device = next(agent.parameters()).device
-        self.temperature = float(temperature)
+        self.q1 = QNetwork(obs_dim, num_actions, hidden)
+        self.q2 = QNetwork(obs_dim, num_actions, hidden)
 
-    def _q_values(self, obs_tensor, mask_tensor):
-        q1 = self.agent.q1(obs_tensor, mask_tensor)
-        q2 = self.agent.q2(obs_tensor, mask_tensor)
-        return torch.minimum(q1, q2)
 
-    def action_probabilities(self, obs, info, deterministic: bool = True):
-        obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-        mask_tensor = torch.as_tensor(info["action_mask"], dtype=torch.float32, device=self.device).unsqueeze(0)
+@register_algorithm
+class CQL(OfflineAlgorithm):
+    name = "cql"
+    method_id = "cql"
+    family = MODEL_FREE
+    description = "Discrete CQL: TD regression plus a conservative logsumexp penalty."
+    validation_objective = "validation conservative Q objective"
+
+    def build(self):
+        return TwinQ(self.spec.obs_dim, self.spec.num_actions, hidden_dims(self.config))
+
+    def loss(self, batch):
+        net = self.model
+        q1_all = net.q1(batch.obs, batch.action_mask)
+        q2_all = net.q2(batch.obs, batch.action_mask)
+        q1 = q1_all.gather(1, batch.action.unsqueeze(1)).squeeze(1)
+        q2 = q2_all.gather(1, batch.action.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            q_values = self._q_values(obs_tensor, mask_tensor).squeeze(0)
-            if deterministic:
-                probs = torch.zeros_like(q_values)
-                probs[torch.argmax(q_values)] = 1.0
-            else:
-                probs = torch.softmax(q_values / max(self.temperature, 1e-6), dim=-1)
-        return probs.cpu().numpy()
+            next_q = torch.minimum(net.q1(batch.next_obs, batch.next_action_mask), net.q2(batch.next_obs, batch.next_action_mask))
+            td_target = batch.reward + float(self.config["gamma"]) * next_q.max(dim=1).values * (1.0 - batch.done)
+        td_loss = F.mse_loss(q1, td_target) + F.mse_loss(q2, td_target)
+        # Inadmissible actions carry a -1e9 Q-value, so logsumexp runs exactly
+        # over the admissible set.
+        conservative = 0.5 * (
+            torch.logsumexp(q1_all, dim=1).mean() - q1.mean() + torch.logsumexp(q2_all, dim=1).mean() - q2.mean()
+        )
+        alpha = float(self.config.get("cql_alpha", 1.0))
+        loss = td_loss + alpha * conservative
+        return loss, {
+            "q_loss": float(td_loss.item()),
+            "cql_loss": float(conservative.item()),
+            "conservative_loss": float((alpha * conservative).item()),
+        }
 
-
-def load_policy(config: dict, checkpoint: dict):
-    env = make_env(config)
-    agent = build_cql_agent(
-        config,
-        obs_dim=env.obs_dim,
-        num_actions=env.num_actions,
-    ).to(get_torch_device())
-    agent.load_state_dict(checkpoint["model_state_dict"])
-    agent.eval()
-    env.close()
-    return CQLPolicy(agent, temperature=float(config.get("policy_temperature", 1.0)))
+    def make_policy(self):
+        return QPolicy(self.model.q1, self.model.q2, temperature=float(self.config.get("policy_temperature", 1.0)))

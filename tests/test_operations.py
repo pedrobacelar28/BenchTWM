@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.bench import _early_stopping_plan, _offline_preflight, _ope_plan
-from benchtwm.algorithms.registry import get_policy_loader, get_trainer
+from benchtwm.algorithms import get_algorithm
 from benchtwm.operations.artifacts import initial_manifest, run_directory, write_manifest
 from benchtwm.operations.catalog import Catalog, apply_overrides, parse_overrides
 from benchtwm.operations.queue import _write_suite_results
@@ -81,8 +81,7 @@ class TestOperations(unittest.TestCase):
                     artifact_root="/tmp/bench-artifacts",
                 )
                 self.assertEqual(resolved.identifier, recipe.identifier)
-                self.assertIsNotNone(get_trainer(params["algo"]))
-                self.assertIsNotNone(get_policy_loader(params["algo"]))
+                self.assertIsNotNone(get_algorithm(params["algo"]))
 
     def test_public_offline_recipes_default_to_twenty_validation_checks_of_patience(self):
         catalog = Catalog.load()

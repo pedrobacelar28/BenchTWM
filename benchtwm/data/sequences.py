@@ -60,8 +60,6 @@ class DreamerSequenceStream:
         shuffle: bool = True,
         cycle: bool = True,
     ):
-        if dataset.obs_backend != "state_vector":
-            raise ValueError("DreamerSequenceStream requires obs_backend='state_vector'")
         if batch_size <= 0 or sequence_length <= 0:
             raise ValueError("batch_size and sequence_length must be positive")
         self.dataset = dataset

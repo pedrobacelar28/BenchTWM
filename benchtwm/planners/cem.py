@@ -29,11 +29,18 @@ class CategoricalCEMPlanner:
         probs = torch.clamp(probs, min=1e-8)
         return probs / probs.sum(dim=-1, keepdim=True)
 
+    @staticmethod
+    def _restrict(probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Exactly zero mass on inadmissible first actions."""
+
+        probs = probs * (mask > 0).float()
+        return probs / probs.sum()
+
     def _initial_probs(self, first_action_mask: torch.Tensor | None) -> torch.Tensor:
         probs = torch.ones(self.horizon, self.num_actions, device=self.device, dtype=torch.float32)
         probs = self._normalize(probs)
         if first_action_mask is not None:
-            probs[0] = self._normalize(first_action_mask.float())
+            probs[0] = self._restrict(probs[0], first_action_mask)
         return probs
 
     def _sample_sequences(self, probs: torch.Tensor) -> torch.Tensor:
@@ -63,7 +70,7 @@ class CategoricalCEMPlanner:
             elite_probs = torch.stack(counts, dim=0)
             probs = self._normalize(self.alpha * probs + (1.0 - self.alpha) * elite_probs)
             if first_action_mask is not None:
-                probs[0] = self._normalize(probs[0] * first_action_mask.float())
+                probs[0] = self._restrict(self._normalize(probs[0]), first_action_mask)
 
         if best_sequence is None:
             best_sequence = self._sample_sequences(probs)[0]

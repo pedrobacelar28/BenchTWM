@@ -6,7 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-from benchtwm.run_experiment import run_experiment
+from benchtwm.runner import run_experiment
 from benchtwm.utils.io import load_json
 from benchtwm.utils.queue_progress import update_progress
 
@@ -22,12 +22,12 @@ def main() -> int:
     try:
         run_experiment(
             job["params"],
-            force_run=bool(job.get("force", False)),
             output_dir=job["output_dir"],
             manifest=job["manifest"],
+            force=bool(job.get("force", False)),
             quiet=True,
         )
-    except Exception as exc:
+    except BaseException as exc:
         update_progress(
             status="failed",
             phase="error",

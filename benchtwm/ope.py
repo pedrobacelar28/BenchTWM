@@ -36,18 +36,14 @@ def _episodes(
     )
     try:
         for indices in dataset._episode_indices:
-            reset_episode = getattr(policy, "reset_episode", None)
-            if callable(reset_episode):
-                reset_episode()
+            policy.reset_episode()
             order = indices[np.argsort(data["timesteps"][indices], kind="stable")]
             rewards = []
             ratios = []
             for index in order:
                 obs = dataset._obs_array("obs")[index]
-                info = {
-                    "action_mask": data["action_masks"][index],
-                    "state_id": int(data["state_ids"][index]),
-                }
+                mask = data["action_masks"][index]
+                info = {"action_mask": mask, "admissible_actions": np.flatnonzero(mask > 0).tolist(), "state_id": int(data["state_ids"][index])}
                 action = int(data["actions"][index])
                 all_probs = np.asarray(policy.action_probabilities(obs, info, deterministic=deterministic), dtype=np.float64)
                 if all_probs.shape != (dataset.num_actions,):
@@ -63,9 +59,7 @@ def _episodes(
                 ratios.append(ratio)
                 target_probs.append(probability)
                 behavior_probs.append(float(np.exp(behavior_logprob)))
-                observe = getattr(policy, "observe", None)
-                if callable(observe):
-                    observe(action, float(data["rewards"][index]))
+                policy.observe(action, float(data["rewards"][index]))
                 transition_bar.update(1)
             records.append({"rewards": np.asarray(rewards, dtype=np.float64), "ratios": np.asarray(ratios, dtype=np.float64)})
     finally:
@@ -80,10 +74,6 @@ def _episodes(
         "behavior_action_probability_max": float(behavior.max()) if behavior.size else 0.0,
         "target_logged_action_support_rate": target_support,
         "target_zero_probability_rate": float(np.mean(probs <= 0.0)) if probs.size else 0.0,
-        # Kept for existing artifacts and report readers. New consumers should use
-        # the explicit target_* fields above.
-        "support_rate": target_support,
-        "out_of_support_rate": float(np.mean(probs <= 0.0)) if probs.size else 0.0,
         "mean_target_action_probability": float(probs.mean()) if probs.size else 0.0,
     }
     return records, diagnostics
@@ -146,7 +136,7 @@ def _reliability(diagnostics: dict[str, float]) -> dict[str, float | str]:
     episodes = max(0.0, float(diagnostics.get("num_episodes", 0.0)))
     ess = max(0.0, float(diagnostics.get("trajectory_ess", 0.0)))
     ess_fraction = ess / episodes if episodes else 0.0
-    target_zero_rate = float(diagnostics.get("target_zero_probability_rate", diagnostics.get("out_of_support_rate", 0.0)))
+    target_zero_rate = float(diagnostics.get("target_zero_probability_rate", 0.0))
     if ess <= 0.0:
         status = "unusable"
         message = "No nonzero trajectory weights; importance-sampling estimates cannot identify the target policy."
@@ -176,23 +166,10 @@ def _reliability(diagnostics: dict[str, float]) -> dict[str, float | str]:
     }
 
 
-def _policy_probability_contract(policy) -> dict[str, str]:
-    """Describe whether action probabilities are exact for the requested policy."""
-
-    contract = getattr(policy, "ope_probability_contract", None)
-    if contract is None:
-        return {
-            "status": "exact",
-            "message": "The policy exposes action probabilities directly for the requested target mode.",
-        }
-    return dict(contract)
-
-
 def evaluate_ope(
     policy,
     *,
     dataset_path: str | Path,
-    obs_backend: str,
     gamma: float = 1.0,
     bootstrap_replicates: int = 200,
     seed: int = 0,
@@ -201,7 +178,7 @@ def evaluate_ope(
     show_progress: bool = False,
     progress_desc: str = "OPE",
 ) -> tuple[dict, pd.DataFrame]:
-    dataset = OfflineTransitionDataset(dataset_path, obs_backend=obs_backend, seed=seed)
+    dataset = OfflineTransitionDataset(dataset_path, seed=seed)
     episodes, diagnostics = _episodes(
         dataset,
         policy,
@@ -240,10 +217,9 @@ def evaluate_ope(
         "estimators": estimator_summary,
         "diagnostics": diagnostics,
         "reliability": _reliability(diagnostics),
-        "policy_probability_contract": _policy_probability_contract(policy),
+        "policy_probability_contract": dict(policy.ope_probability_contract),
         "config": {
             "dataset_path": str(dataset.path),
-            "obs_backend": obs_backend,
             "gamma": float(gamma),
             "bootstrap_replicates": int(bootstrap_replicates),
             "seed": int(seed),
