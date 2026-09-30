@@ -59,7 +59,7 @@ and `tests/test_ope.py` cover training, deployment, and OPE on every
 environment.
 
 The pinned fixture in `tests/fixtures/dreamer_jax_reference.json` was generated
-with JAX 0.4.33 by `scripts/dreamer_jax_reference.py`. It compares fixed
+with JAX 0.4.33 by `tests/fixtures/dreamer_jax_reference.py`. It compares fixed
 symlog, RMS, lambda-return, and blocked RSSM-core outputs against the PyTorch
 modules with identical tensors and parameters.
 

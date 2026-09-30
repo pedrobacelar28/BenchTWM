@@ -11,5 +11,5 @@ pdflatex main.tex
 ```
 
 The factual benchmark descriptions are based on the local paper copies in
-`../../repos_usados/papers_txt/` and the vendored runtime code. The document
+`../research/papers/` and the vendored runtime code. The document
 distinguishes those source benchmarks from algorithms implemented locally.

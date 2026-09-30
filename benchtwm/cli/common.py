@@ -12,7 +12,7 @@ from typing import Any, Iterator
 from benchtwm.algorithms import get_algorithm
 from benchtwm.config import Benchmark, ConfigError, dataset_paths, parse_overrides
 from benchtwm.operations.artifacts import artifact_root, initial_manifest, run_directory
-from benchtwm.operations.console import BenchConsole
+from benchtwm.cli.console import BenchConsole
 from benchtwm.utils.io import load_json
 
 

@@ -1,3 +1,0 @@
-# Pinned reference environment. Install with:
-#   pip install -r requirements.txt && pip install -e . --no-deps
--r requirements-lock.txt

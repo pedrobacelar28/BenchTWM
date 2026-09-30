@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit deterministic JAX fixtures for the PyTorch Dreamer fidelity tests.
 
-This script is intentionally outside the BenchTWM runtime. Run it from an
-isolated environment with JAX installed and compare its JSON output with
+This script is intentionally outside the BenchTWM runtime and is not a test. Run
+it from an isolated environment with JAX installed and compare its JSON output with
 ``tests/fixtures/dreamer_jax_reference.json``.
 """
 

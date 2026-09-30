@@ -25,6 +25,5 @@ artifacts/
 !third_party/icu-sepsis/packages/icu_sepsis/icu_sepsis/envs/assets/dynamics.npz
 
 # Local reference checkouts used to audit the vendored code. They are not part
-# of the package; only the copied paper texts are versioned.
-repos_usados/*
-!repos_usados/papers_txt/
+# of the package; the paper texts are versioned under docs/research/papers/.
+repos_usados/

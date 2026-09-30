@@ -16,6 +16,9 @@ Read in the order of an experiment's lifecycle:
 9. [DreamerV3 fidelity audit](dreamer-fidelity.md).
 10. [Technical specification](paper/main.tex): the benchmark in paper form,
     without empirical results.
+11. [Research notes](research/): candidate structured environments and
+    datasets ([CATALOGO_AMBIENTES.md](research/CATALOGO_AMBIENTES.md),
+    Portuguese) and the text of the ICU-Sepsis and EpiCare papers (`papers/`).
 
 Throughout, three things are kept apart:
 

@@ -33,7 +33,7 @@ dataset.
 ## Install
 
 ```bash
-pip install -r requirements.txt    # pinned reference versions
+pip install -r requirements-lock.txt  # pinned reference versions
 pip install -e . --no-deps         # benchtwm + the vendored ICU-Sepsis and EpiCare cores
 ```
 
@@ -66,12 +66,12 @@ benchtwm/
   ope.py         importance-sampling OPE
   runner.py      one run: train -> evaluate -> OPE -> artifacts
   config.py      layered configs and the derived catalog
-  operations/    artifacts, local queue, reports, summaries
-  cli/           the `bench` command
+  operations/    run artifacts, the local job queue, and cross-run summaries
+  cli/           the `bench` command, terminal output, and per-run reports
 configs/         protocol, per-algorithm defaults, environments, datasets, overrides
 tests/           contract tests over every environment and algorithm, plus unit tests
 third_party/     vendored ICU-Sepsis and EpiCare runtimes (see THIRD_PARTY_NOTICES.md)
-docs/            documentation
+docs/            documentation, the technical specification, and research notes
 artifacts/       generated datasets, runs, queues, reports (git-ignored)
 ```
 
@@ -94,7 +94,7 @@ tests pick up new registrations automatically. See
 - [Extending the benchmark](docs/extending.md)
 - [DreamerV3 fidelity audit](docs/dreamer-fidelity.md)
 - [Technical specification](docs/paper/main.tex)
-- [Candidate structured environments and datasets](CATALOGO_AMBIENTES.md) (research notes, Portuguese)
+- [Candidate structured environments and datasets](docs/research/CATALOGO_AMBIENTES.md) (research notes, Portuguese)
 
 ## Tests
 

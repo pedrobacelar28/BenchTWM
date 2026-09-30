@@ -38,10 +38,10 @@ def test_ope_rejects_canonical_write_for_a_counterfactual_target(capsys):
     assert code == 2 and "--write-canonical is only valid" in err
 
 
-def test_console_script_entry_points():
-    for command in ([sys.executable, "-m", "benchtwm", "catalog", "--json"], [sys.executable, "scripts/bench.py", "catalog", "--json"]):
-        payload = json.loads(subprocess.run(command, text=True, capture_output=True, check=True).stdout)
-        assert len(payload["datasets"]) == 16
+def test_module_entry_point():
+    command = [sys.executable, "-m", "benchtwm", "catalog", "--json"]
+    payload = json.loads(subprocess.run(command, text=True, capture_output=True, check=True).stdout)
+    assert len(payload["datasets"]) == 16
 
 
 def test_manifest_lifecycle_and_stale_detection(tmp_path):

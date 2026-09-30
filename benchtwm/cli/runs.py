@@ -7,7 +7,7 @@ from benchtwm.cli.data import inspect_dataset
 from benchtwm.evaluation import evaluate_policy
 from benchtwm.operations.artifacts import discover_runs, effective_status, load_manifest, manifest_family, resolve_run
 from benchtwm.operations.queue import QueueJob, execute_queue
-from benchtwm.operations.reporting import build_run_report
+from benchtwm.cli.reporting import build_run_report
 from benchtwm.ope import evaluate_ope, export_ope
 from benchtwm.runner import load_run, run_experiment
 from benchtwm.utils.io import ensure_dir, load_json, save_json

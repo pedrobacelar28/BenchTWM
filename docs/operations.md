@@ -1,6 +1,6 @@
 # Command Line and Artifacts
 
-`bench` (equivalently `python -m benchtwm` or `python scripts/bench.py`).
+`bench` (equivalently `python -m benchtwm`).
 Global options, accepted before or after the subcommand: `--artifact-root`
 (default `artifacts/`), `--config-root` (default `configs/`), `--json`, and
 `--color never`.
@@ -71,3 +71,15 @@ artifacts/
 evaluation summary, OPE headline, timings) in one document for downstream
 analysis. Runs written before this layout (under `.../offline/<method>/`)
 are still discovered and loaded.
+
+## Downstream analysis
+
+Notebooks and plots should read the exported files, not private runner objects:
+
+- `bench research summarize` writes `runs.csv`, `aggregate.csv`,
+  `planning_gain.csv`, `summary.json`, and `report.md` under
+  `artifacts/reports/summary/`.
+- `bench research collect` writes a flat index of every run, with its training,
+  evaluation, OPE, and timing scalars, to `artifacts/reports/run_index.csv`.
+- Each run directory holds `metrics_summary.json` plus the per-episode and
+  per-step CSV files listed in the artifact layout above.
