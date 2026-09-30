@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+runs/
+/datasets/
+reports/
+plots/
+processed/
+artifacts/
+
+*.sqlite3
+*.pt
+*.pth
+*.pkl
+*.npz
+*.log
+
+# Vendored ICU-Sepsis dynamics are immutable runtime assets, not generated
+# experiment artifacts. Keep this package asset available after cleanups.
+!third_party/icu-sepsis/packages/icu_sepsis/icu_sepsis/envs/assets/dynamics.npz
+
+# Local reference checkouts used to audit the vendored code. They are not part
+# of the package; only the copied paper texts are versioned.
+repos_usados/*
+!repos_usados/papers_txt/

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "benchtwm"
+version = "0.2.0"
+description = "Offline RL and world-model benchmark for structured decision data."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "pandas",
+  "torch",
+  "gymnasium",
+  "scipy",  # EpiCare
+  "rich",
+  "tqdm",
+  "optuna",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+# The vendored benchmark cores are installed as top-level packages next to
+# benchtwm, straight from third_party/, so no sys.path manipulation is needed.
+where = [".", "third_party/epicare", "third_party/icu-sepsis/packages/icu_sepsis"]
+include = ["benchtwm*", "epicare*", "icu_sepsis*"]
+
+[tool.setuptools.package-data]
+icu_sepsis = ["envs/assets/*"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "third_party/epicare", "third_party/icu-sepsis/packages/icu_sepsis"]
+testpaths = ["tests"]
+addopts = "-q"

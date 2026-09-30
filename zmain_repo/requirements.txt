@@ -1,2 +1,0 @@
-# Install the reproducible v0 environment from the checked-in lock file.
--r requirements-lock.txt

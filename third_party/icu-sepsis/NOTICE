@@ -1,0 +1,16 @@
+This directory vendors the ICU-Sepsis environment package.
+
+Source: https://github.com/icu-sepsis/icu-sepsis
+Copyright (c) Kartik Choudhary, Dhawal Gupta, and Philip S. Thomas.
+Licensed under the MIT License; see LICENSE and packages/icu_sepsis/LICENSE.txt.
+
+Local modifications:
+- Only the runtime package `icu_sepsis` is vendored. The `icu_sepsis_helpers`
+  package (MDP construction from MIMIC-III, plotting, analyses) was removed;
+  BenchTWM re-implements the one helper it needs, tabular value iteration,
+  with identical semantics.
+- The legacy OpenAI Gym registrations and wrappers (`GymWrapper`,
+  `LegacyFlattenActionWrapper`, the `*-legacy` environment IDs) were removed so
+  the package depends only on Gymnasium. The Gymnasium environments
+  `Sepsis/ICU-Sepsis-v1` and `Sepsis/ICU-Sepsis-v2`, their dynamics, and the
+  packaged MDP assets are unchanged.
